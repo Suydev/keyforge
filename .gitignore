@@ -1,0 +1,52 @@
+# ── Secrets: never commit ────────────────────────────────────────────────────
+# API keys. One key per line. On the author's device these files are the ONLY
+# copy — see docs/CONFIGURATION.md before touching them.
+*-keys.txt
+keys.txt
+auth.json
+
+# Proxy endpoints, `host:port:user:pass` per line.
+proxies.txt
+
+# Account credentials database.
+accounts.db
+accounts.db-shm
+accounts.db-wal
+
+# Runtime state: contains every API key in plaintext plus balances.
+gateway-state.json
+gateway-state.json.bak
+gateway-state.corrupt-*
+gateway-state.lock
+providers.json
+proxy-state.json
+
+# Environment overrides.
+.env
+.env.*
+!.env.example
+
+# ── Build output ─────────────────────────────────────────────────────────────
+/target
+**/*.rs.bk
+*.pdb
+
+# ── Logs and scratch ─────────────────────────────────────────────────────────
+*.log
+tabi-gateway.log
+/tmp/
+*.tmp
+*.bin
+
+# ── Editor / OS noise ────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~
+
+# ── Captures that may embed credentials or session content ───────────────────
+captcha-*.png
+*.har
+snapshot*.json

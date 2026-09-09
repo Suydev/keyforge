@@ -1,0 +1,116 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 620" width="880" height="620" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">
+  <title>Error taxonomy: eight classes, eight different actions</title>
+  <desc>The gateway classifies every upstream failure into one of eight kinds. Each has a distinct effect on the key, the provider, and the retry decision. Treating them uniformly is what makes a naive proxy destructive.</desc>
+
+  <style>
+    .bg    { fill: #0d1117; }
+    .row   { fill: #161b22; stroke: #30363d; stroke-width: 1; rx: 4; }
+    .rowhi { fill: #1c2128; stroke: #3b82f6; stroke-width: 1; rx: 4; }
+    .tb    { fill: #e6edf3; font-size: 13px; font-weight: 600; }
+    .t     { fill: #e6edf3; font-size: 12px; }
+    .dim   { fill: #8b949e; font-size: 11px; }
+    .lbl   { fill: #7d8590; font-size: 10px; letter-spacing: .08em; }
+    .keep  { fill: #3fb950; font-size: 11px; }
+    .drop  { fill: #f85149; font-size: 11px; }
+    .cool  { fill: #d29922; font-size: 11px; }
+    .note  { fill: #7d8590; font-size: 11px; font-style: italic; }
+  </style>
+
+  <rect class="bg" x="0" y="0" width="880" height="620"/>
+
+  <text class="tb"  x="40" y="34">Error taxonomy — eight classes, eight different actions</text>
+  <text class="dim" x="40" y="52">Treating failures uniformly is what makes a naive proxy destructive.</text>
+
+  <text class="lbl" x="40"  y="82">CLASS</text>
+  <text class="lbl" x="160" y="82">MEANS</text>
+  <text class="lbl" x="452" y="82">KEY</text>
+  <text class="lbl" x="580" y="82">PROVIDER</text>
+  <text class="lbl" x="722" y="82">THEN</text>
+
+  <!-- QUOTA -->
+  <rect class="row" x="36" y="92" width="808" height="42"/>
+  <text class="tb"   x="48"  y="118">QUOTA</text>
+  <text class="t"    x="160" y="112">out of money</text>
+  <text class="dim"  x="160" y="127">exact remainder reported by upstream</text>
+  <text class="drop" x="452" y="118">retired 6h</text>
+  <text class="keep" x="580" y="118">untouched</text>
+  <text class="dim"  x="722" y="118">next key</text>
+
+  <!-- AUTH -->
+  <rect class="row" x="36" y="140" width="808" height="42"/>
+  <text class="tb"   x="48"  y="166">AUTH</text>
+  <text class="t"    x="160" y="160">invalid or revoked</text>
+  <text class="dim"  x="160" y="175">effectively permanent</text>
+  <text class="drop" x="452" y="166">retired 7d</text>
+  <text class="keep" x="580" y="166">untouched</text>
+  <text class="dim"  x="722" y="166">next key</text>
+
+  <!-- RATE -->
+  <rect class="row" x="36" y="188" width="808" height="42"/>
+  <text class="tb"   x="48"  y="214">RATE</text>
+  <text class="t"    x="160" y="208">healthy but busy</text>
+  <text class="dim"  x="160" y="223">often per-IP, not per-key</text>
+  <text class="cool" x="452" y="214">cooled</text>
+  <text class="keep" x="580" y="214">untouched</text>
+  <text class="dim"  x="722" y="214">next key</text>
+
+  <!-- TIMEOUT -->
+  <rect class="rowhi" x="36" y="236" width="808" height="42"/>
+  <text class="tb"   x="48"  y="262">TIMEOUT</text>
+  <text class="t"    x="160" y="256">slow, not dead</text>
+  <text class="note" x="160" y="271">524 means the origin is STILL working</text>
+  <text class="keep" x="452" y="262">untouched</text>
+  <text class="cool" x="580" y="262">soft count only</text>
+  <text class="dim"  x="722" y="262">next key</text>
+
+  <!-- WAF -->
+  <rect class="rowhi" x="36" y="284" width="808" height="42"/>
+  <text class="tb"   x="48"  y="310">WAF</text>
+  <text class="t"    x="160" y="304">CDN challenge — our egress</text>
+  <text class="note" x="160" y="319">usually the User-Agent, never the key</text>
+  <text class="keep" x="452" y="310">untouched</text>
+  <text class="cool" x="580" y="310">soft count</text>
+  <text class="dim"  x="722" y="310">sibling</text>
+
+  <!-- NOCHANNEL -->
+  <rect class="rowhi" x="36" y="332" width="808" height="42"/>
+  <text class="tb"   x="48"  y="358">NOCHANNEL</text>
+  <text class="t"    x="160" y="352">provider has no backend for this model</text>
+  <text class="note" x="160" y="367">every sibling key returns the same answer</text>
+  <text class="keep" x="452" y="358">untouched</text>
+  <text class="cool" x="580" y="358">cooled 45s</text>
+  <text class="dim"  x="722" y="358">sibling</text>
+
+  <!-- UPSTREAM -->
+  <rect class="row" x="36" y="380" width="808" height="42"/>
+  <text class="tb"   x="48"  y="406">UPSTREAM</text>
+  <text class="t"    x="160" y="400">genuine 5xx or connection reset</text>
+  <text class="dim"  x="160" y="415">provider-side fault</text>
+  <text class="keep" x="452" y="406">untouched</text>
+  <text class="drop" x="580" y="406">breaker on streak</text>
+  <text class="dim"  x="722" y="406">sibling</text>
+
+  <!-- OFFLINE -->
+  <rect class="row" x="36" y="428" width="808" height="42"/>
+  <text class="tb"   x="48"  y="454">OFFLINE</text>
+  <text class="t"    x="160" y="448">the device has no network</text>
+  <text class="dim"  x="160" y="463">DNS or routing failed entirely</text>
+  <text class="keep" x="452" y="454">untouched</text>
+  <text class="keep" x="580" y="454">untouched</text>
+  <text class="dim"  x="722" y="454">hold, wait</text>
+
+  <!-- lessons -->
+  <text class="lbl" x="40" y="502">THE HIGHLIGHTED THREE WERE LEARNED THE HARD WAY</text>
+
+  <text class="t"    x="40" y="526">WAF must never burn a key.</text>
+  <text class="dim"  x="272" y="526">An early version retired keys on CDN 403s and destroyed much of the pool.</text>
+
+  <text class="t"    x="40" y="546">TIMEOUT is not UPSTREAM.</text>
+  <text class="dim"  x="272" y="546">A 524 origin is still working; failing over abandons a provider about to answer.</text>
+
+  <text class="t"    x="40" y="566">NOCHANNEL is a provider fact.</text>
+  <text class="dim"  x="272" y="566">Cycling keys against a backend outage produced ~57 attempts in 8 minutes</text>
+  <text class="dim"  x="272" y="582">and earned a CDN rate-limit strike — turning their outage into ours too.</text>
+
+  <text class="note" x="40" y="606">QUOTA additionally requires two independent signals: retiring a funded key on a misread costs real money.</text>
+</svg>

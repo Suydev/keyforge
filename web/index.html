@@ -1,0 +1,680 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!-- width=device-width + user-scalable NOT disabled (a11y: zoom must work) -->
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#0f172a">
+<title>Tabi Gateway</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<!-- display=swap avoids FOIT; only the weights actually used are requested -->
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<!-- Applied BEFORE the stylesheet so the saved theme paints on the first frame.
+     Doing this in app.js would flash the default dark theme first. Inline and
+     tiny on purpose; it is the only blocking script on the page. -->
+<script>
+(function () {
+  try {
+    var s = JSON.parse(localStorage.getItem('tabi.ui') || '{}');
+    var r = document.documentElement;
+    r.dataset.theme = s.theme || 'dark';
+    r.dataset.accent = s.accent || 'green';
+    r.dataset.density = s.density || 'standard';
+    r.dataset.motion = s.motion || 'full';
+    // Keep the browser UI (address bar, scrollbars) in step with the theme.
+    var meta = document.querySelector('meta[name="color-scheme"]');
+    if (meta) meta.content = (s.theme === 'light') ? 'light' : 'dark';
+  } catch (e) {
+    // A corrupt or blocked localStorage must never leave the page unstyled.
+    document.documentElement.dataset.theme = 'dark';
+    document.documentElement.dataset.accent = 'green';
+    document.documentElement.dataset.density = 'standard';
+    document.documentElement.dataset.motion = 'full';
+  }
+})();
+</script>
+<link rel="stylesheet" href="/app.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><text y='19' font-size='20'>&#9889;</text></svg>">
+</head>
+<body>
+
+<a class="skip" href="#main">Skip to main content</a>
+
+<header class="top">
+  <div class="brand">
+    <!-- Lucide "zap": SVG, not emoji, so it inherits currentColor and scales -->
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M4 14h6v7l10-11h-6V3z"/>
+    </svg>
+    <span>Tabi Gateway</span>
+    <span class="sub" id="brandSub">local</span>
+  </div>
+
+  <div class="spacer"></div>
+
+  <!-- Sound toggle: browsers require a user gesture before audio can play, so
+       this doubles as the permission gesture. -->
+  <button class="btn ghost" id="soundBtn" type="button" aria-pressed="false"
+          title="Alert sound for errors and offline events">
+    <svg id="soundOn" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" hidden>
+      <path d="M11 5 6 9H2v6h4l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 5.5a9 9 0 0 1 0 13"/>
+    </svg>
+    <svg id="soundOff" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M11 5 6 9H2v6h4l5 4z"/><path d="m22 9-6 6"/><path d="m16 9 6 6"/>
+    </svg>
+    <span id="soundLabel">Alerts off</span>
+  </button>
+
+  <!-- Freshness: seconds since the last push. A green dot on frozen data is the
+       most misleading thing a live dashboard can show, so age is explicit. -->
+  <span class="fresh" id="fresh" data-stale="0" title="Time since the last update from the gateway">
+    <span class="bar" aria-hidden="true"><i></i></span>
+    <span id="freshText">—</span>
+  </span>
+
+  <button class="btn ghost" id="appearanceBtn" type="button"
+          aria-haspopup="dialog" aria-expanded="false" aria-controls="appearancePanel"
+          title="Theme, density, motion and chart quality">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <circle cx="12" cy="12" r="3"/>
+      <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>
+    </svg>
+    <span>Display</span>
+  </button>
+
+  <!-- State is icon + text + colour, never colour alone -->
+  <span class="conn" id="conn" data-state="connecting" role="status" aria-live="polite">
+    <span class="dot" aria-hidden="true"></span>
+    <span id="connText">Connecting…</span>
+  </span>
+</header>
+
+<nav class="tabs" role="tablist" aria-label="Dashboard sections">
+  <button role="tab" id="tab-overview" aria-controls="page-overview" aria-selected="true" data-page="overview">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="9"/><rect x="14" y="3" width="7" height="5"/><rect x="14" y="12" width="7" height="9"/><rect x="3" y="16" width="7" height="5"/></svg>
+    Overview
+  </button>
+  <button role="tab" id="tab-providers" aria-controls="page-providers" aria-selected="false" data-page="providers">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="20" height="8" rx="2"/><rect x="2" y="13" width="20" height="8" rx="2"/><path d="M6 7h.01M6 17h.01"/></svg>
+    Providers
+  </button>
+  <button role="tab" id="tab-models" aria-controls="page-models" aria-selected="false" data-page="models">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2 2 7l10 5 10-5z"/><path d="m2 17 10 5 10-5"/><path d="m2 12 10 5 10-5"/></svg>
+    Models
+  </button>
+  <button role="tab" id="tab-sessions" aria-controls="page-sessions" aria-selected="false" data-page="sessions">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/></svg>
+    Sessions
+  </button>
+  <button role="tab" id="tab-keys" aria-controls="page-keys" aria-selected="false" data-page="keys">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6"/><path d="m15.5 7.5 3 3L22 7l-3-3"/></svg>
+    Keys
+  </button>
+  <button role="tab" id="tab-traffic" aria-controls="page-traffic" aria-selected="false" data-page="traffic">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20V10"/><path d="M18 20V4"/><path d="M6 20v-4"/></svg>
+    Traffic
+  </button>
+  <button role="tab" id="tab-errors" aria-controls="page-errors" aria-selected="false" data-page="errors">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg>
+    Errors <span class="tab-badge" id="errBadge" hidden>0</span>
+  </button>
+  <button role="tab" id="tab-proxies" aria-controls="page-proxies" aria-selected="false" data-page="proxies">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 4h16v6H4zM4 14h16v6H4z"/><path d="M8 7h.01M8 17h.01"/></svg>
+    Egress
+  </button>
+  <button role="tab" id="tab-events" aria-controls="page-events" aria-selected="false" data-page="events">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8M8 17h5"/></svg>
+    Events
+  </button>
+  <button role="tab" id="tab-settings" aria-controls="page-settings" aria-selected="false" data-page="settings">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+    Settings
+  </button>
+</nav>
+
+<main id="main" tabindex="-1">
+
+  <div class="banner" id="offlineBanner" hidden role="status">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M12 20h.01"/><path d="M8.5 16.4a5 5 0 0 1 7 0"/><path d="M5 12.9a10 10 0 0 1 14 0"/><path d="m2 2 20 20"/>
+    </svg>
+    <div>
+      <strong>Network offline.</strong>
+      Requests are being <em>held</em>, not failed — they resume automatically when the connection returns.
+      Live updates paused.
+    </div>
+  </div>
+
+  <!-- ── OVERVIEW ─────────────────────────────────────────────────────────── -->
+  <section class="page" id="page-overview" role="tabpanel" aria-labelledby="tab-overview">
+    <h2 class="section">At a glance</h2>
+    <div class="grid kpis" id="kpis">
+      <!-- Skeleton tiles reserve height so the first render cannot shift layout -->
+      <div class="kpi"><span class="kpi-label">Requests</span><div class="kpi-value num" id="kRequests">—</div><div class="kpi-sub" id="kRequestsSub">&nbsp;</div></div>
+      <div class="kpi"><span class="kpi-label">Errors</span><div class="kpi-value num" id="kErrors">—</div><div class="kpi-sub" id="kErrorsSub">&nbsp;</div></div>
+      <div class="kpi"><span class="kpi-label">Spend</span><div class="kpi-value num" id="kCost">—</div><div class="kpi-sub" id="kCostSub">&nbsp;</div></div>
+      <div class="kpi"><span class="kpi-label">Keys usable</span><div class="kpi-value num" id="kKeys">—</div><div class="kpi-sub" id="kKeysSub">&nbsp;</div></div>
+      <div class="kpi"><span class="kpi-label">Credit left</span><div class="kpi-value num" id="kFunds">—</div><div class="kpi-sub" id="kFundsSub">&nbsp;</div></div>
+      <div class="kpi"><span class="kpi-label">Sessions live</span><div class="kpi-value num" id="kSessions">—</div><div class="kpi-sub" id="kSessionsSub">&nbsp;</div></div>
+      <div class="kpi"><span class="kpi-label">Data moved</span><div class="kpi-value num" id="kBytes">—</div><div class="kpi-sub" id="kBytesSub">&nbsp;</div></div>
+      <div class="kpi"><span class="kpi-label">Auto-recoveries</span><div class="kpi-value num" id="kSaves">—</div><div class="kpi-sub" id="kSavesSub">&nbsp;</div></div>
+    </div>
+
+
+    <h2 class="section">Working right now</h2>
+    <div class="card">
+      <h3>
+        In-flight requests
+        <span class="hint" id="liveHint">a request appears the moment it enters the gateway</span>
+      </h3>
+      <div class="table-scroll">
+        <table id="liveTable">
+          <caption class="sr-only">Requests currently being served</caption>
+          <thead><tr>
+            <th scope="col">Session</th><th scope="col">Client</th><th scope="col">Model</th>
+            <th scope="col">Provider</th><th scope="col">Key</th>
+            <th scope="col">Phase</th><th scope="col" class="num">Round</th>
+            <th scope="col" class="num">Keys tried</th><th scope="col" class="num">Elapsed</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="empty" id="liveEmpty" hidden>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+        <div>Idle &mdash; no requests in flight.</div>
+      </div>
+    </div>
+
+    <h2 class="section">Request volume &amp; latency</h2>
+    <div class="card spot">
+      <h3>
+        Traffic
+        <span class="hint" id="reqChartHint">1-minute buckets</span>
+      </h3>
+      <!-- Range selector. Each chip picks a window; the gateway is asked for the
+           matching rollup (minute / hour / day) rather than the client thinning
+           a huge minute series. -->
+      <div class="chart-toolbar">
+        <div class="chips" id="reqRange" role="group" aria-label="Chart time range">
+          <button type="button" data-range="5m" aria-pressed="false" aria-label="Show 5 minutes">5M</button>
+          <button type="button" data-range="30m" aria-pressed="false" aria-label="Show 30 minutes">30M</button>
+          <button type="button" data-range="2h" aria-pressed="true" aria-label="Show 2 hours">2H</button>
+          <button type="button" data-range="6h" aria-pressed="false" aria-label="Show 6 hours">6H</button>
+          <button type="button" data-range="24h" aria-pressed="false" aria-label="Show 24 hours">24H</button>
+          <button type="button" data-range="7d" aria-pressed="false" aria-label="Show 7 days">7D</button>
+          <button type="button" data-range="30d" aria-pressed="false" aria-label="Show 30 days">30D</button>
+          <button type="button" data-range="all" aria-pressed="false" aria-label="Show all recorded history">ALL</button>
+        </div>
+        <span class="grow"></span>
+        <span class="res-note" id="reqResNote">1m buckets</span>
+      </div>
+      <!-- Chart + text alternative. The table is the a11y fallback (WCAG). -->
+      <div class="chart-wrap">
+        <canvas id="reqChart" role="img"
+          aria-label="Line chart of requests, errors and average latency over the selected range."></canvas>
+      </div>
+      <!-- Spoken summary of the series, since a canvas is opaque to screen
+           readers (skill: screen-reader-summary). -->
+      <p class="sr-only" id="reqChartSummary" aria-live="polite"></p>
+      <div class="legend" id="reqLegend"></div>
+      <details>
+        <summary>Show data as table</summary>
+        <div class="table-scroll">
+          <table id="reqTable">
+            <caption class="sr-only">Requests, errors and latency per minute</caption>
+            <thead><tr><th scope="col">Time</th><th scope="col" class="num">Requests</th><th scope="col" class="num">Errors</th><th scope="col" class="num">Avg ms</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </details>
+    </div>
+
+    <h2 class="section">Providers</h2>
+    <div class="grid cards" id="providerCards"></div>
+  </section>
+
+  <!-- ── PROVIDERS ────────────────────────────────────────────────────────── -->
+  <section class="page" id="page-providers" role="tabpanel" aria-labelledby="tab-providers" hidden>
+    <h2 class="section">Availability</h2>
+    <div class="card">
+      <h3>
+        Uptime timeline
+        <span class="hint">free <code>/v1/models</code> probe every 5&nbsp;min — spends no credits</span>
+      </h3>
+      <div id="uptimeRows"></div>
+    </div>
+
+
+    <h2 class="section">Leaderboard</h2>
+    <div class="card">
+      <h3>
+        Ranked by the same score routing uses
+        <span class="hint">lower is better &mdash; components shown so a surprising rank makes sense</span>
+      </h3>
+      <div class="table-scroll">
+        <table id="lbTable">
+          <caption class="sr-only">Provider ranking with score components</caption>
+          <thead><tr>
+            <th scope="col" class="num">#</th><th scope="col">Provider</th>
+            <th scope="col" class="num">Score</th><th scope="col">Breakdown</th>
+            <th scope="col" class="num">Latency</th><th scope="col" class="num">Success</th>
+            <th scope="col" class="num">Uptime</th><th scope="col" class="num">Keys</th>
+            <th scope="col" class="num">Credit</th><th scope="col" class="num">$/req</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p class="help" id="lbWeights"></p>
+    </div>
+
+    <h2 class="section">Latency comparison</h2>
+    <div class="card">
+      <h3>Rolling average response time <span class="hint">lower is faster; routing prefers the faster host</span></h3>
+      <div class="table-scroll">
+        <table id="latTable">
+          <caption class="sr-only">Provider latency and routing statistics</caption>
+          <thead><tr>
+            <th scope="col">Provider</th><th scope="col">Host</th>
+            <th scope="col" class="num">Avg ms</th><th scope="col" class="num">Uptime</th>
+            <th scope="col" class="num">Requests</th><th scope="col" class="num">Errors</th>
+            <th scope="col" class="num">Hold</th><th scope="col">Status</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── MODELS ───────────────────────────────────────────────────────────── -->
+  <section class="page" id="page-models" role="tabpanel" aria-labelledby="tab-models" hidden>
+    <h2 class="section">Combined model usage</h2>
+    <div class="card">
+      <h3>All providers together <span class="hint">sortable — tap a column heading</span></h3>
+      <div class="table-scroll">
+        <table id="modelTable">
+          <caption class="sr-only">Model usage combined across every provider</caption>
+          <thead><tr>
+            <th scope="col" aria-sort="none" data-sort="id">Model</th>
+            <th scope="col">Served by</th>
+            <th scope="col" class="num" aria-sort="descending" data-sort="requests">Requests</th>
+            <th scope="col" class="num" data-sort="errors">Errors</th>
+            <th scope="col" class="num" data-sort="cost">Cost</th>
+            <th scope="col" class="num" data-sort="inTokens">In tokens</th>
+            <th scope="col" class="num" data-sort="outTokens">Out tokens</th>
+            <th scope="col" class="num" data-sort="avgMs">Avg ms</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="empty" id="modelEmpty" hidden>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 2 2 7l10 5 10-5z"/><path d="m2 17 10 5 10-5"/></svg>
+        <div>No model traffic yet. Send a request through the gateway and it will appear here.</div>
+      </div>
+    </div>
+
+    <h2 class="section">Available but unused</h2>
+    <div class="card">
+      <h3>Advertised by a provider, no traffic yet</h3>
+      <div id="advertised" class="row"></div>
+    </div>
+  </section>
+
+  <!-- ── SESSIONS ─────────────────────────────────────────────────────────── -->
+  <section class="page" id="page-sessions" role="tabpanel" aria-labelledby="tab-sessions" hidden>
+    <h2 class="section">Session spend attribution</h2>
+    <div class="card">
+      <h3>
+        Which conversation spent what
+        <span class="hint">a session is pinned to one key so spend is attributable</span>
+      </h3>
+      <div class="table-scroll">
+        <table id="sessionTable">
+          <caption class="sr-only">Per-session cost, tokens and key assignment</caption>
+          <thead><tr>
+            <th scope="col">Session</th><th scope="col">Provider</th><th scope="col">Key</th>
+            <th scope="col" class="num">Turns</th><th scope="col" class="num">Cost</th>
+            <th scope="col" class="num">In</th><th scope="col" class="num">Out</th>
+            <th scope="col" class="num">Data</th><th scope="col">Models</th><th scope="col">Last seen</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="empty" id="sessionEmpty" hidden>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="9" cy="7" r="4"/><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/></svg>
+        <div>No sessions yet.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── KEYS ─────────────────────────────────────────────────────────────── -->
+  <section class="page" id="page-keys" role="tabpanel" aria-labelledby="tab-keys" hidden>
+    <h2 class="section">Add a key</h2>
+    <div class="card">
+      <h3>Verify &amp; adopt</h3>
+      <form id="addKeyForm" novalidate>
+        <div class="field">
+          <label for="keyInput">API key</label>
+          <div class="row">
+            <input id="keyInput" name="key" type="password" inputmode="text"
+                   autocomplete="off" spellcheck="false" autocapitalize="off"
+                   placeholder="sk-…" aria-describedby="keyHelp keyResult" required>
+            <button class="btn ghost" type="button" id="revealBtn" aria-pressed="false"
+                    aria-label="Show key characters">Show</button>
+            <button class="btn" type="submit" id="addBtn">
+              <span id="addBtnLabel">Verify &amp; add</span>
+            </button>
+          </div>
+          <p class="help" id="keyHelp">
+            Checked against every provider using free endpoints only — no credits are spent.
+            The key is adopted only if it still holds enough balance to serve requests.
+          </p>
+        </div>
+      </form>
+      <!-- role=status so a screen reader announces the outcome without stealing focus -->
+      <div class="result" id="keyResult" role="status" aria-live="polite" hidden></div>
+    </div>
+
+    <h2 class="section">Key pool</h2>
+    <div class="card">
+      <h3>
+        Per-key balance
+        <span class="hint">drain-first: the lowest funded key is used until empty</span>
+      </h3>
+      <div class="row" id="keyProviderTabs" role="group" aria-label="Choose provider"></div>
+      <div class="table-scroll" style="margin-top:12px">
+        <table id="keyTable">
+          <caption class="sr-only">Individual key balances and status</caption>
+          <thead><tr>
+            <th scope="col">Key</th><th scope="col" class="num">Balance</th>
+            <th scope="col" class="num">Spent</th><th scope="col" class="num">Turns</th>
+            <th scope="col">Source</th><th scope="col">Status</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p class="help" id="keyTableNote"></p>
+    </div>
+  </section>
+
+  <!-- ── TRAFFIC ──────────────────────────────────────────────────────────── -->
+  <section class="page" id="page-traffic" role="tabpanel" aria-labelledby="tab-traffic" hidden>
+    <h2 class="section">Data through the gateway</h2>
+    <div class="grid kpis">
+      <div class="kpi"><span class="kpi-label">Total</span><div class="kpi-value num" id="tTotal">—</div><div class="kpi-sub">up + down</div></div>
+      <div class="kpi"><span class="kpi-label">Uploaded</span><div class="kpi-value num" id="tUp">—</div><div class="kpi-sub">prompts sent</div></div>
+      <div class="kpi"><span class="kpi-label">Downloaded</span><div class="kpi-value num" id="tDown">—</div><div class="kpi-sub">responses received</div></div>
+      <div class="kpi"><span class="kpi-label">Avg / request</span><div class="kpi-value num" id="tAvg">—</div><div class="kpi-sub">both directions</div></div>
+    </div>
+
+    <h2 class="section">Throughput over time</h2>
+    <div class="card spot">
+      <h3>Throughput <span class="hint" id="byteChartHint">upload and download</span></h3>
+      <div class="chart-toolbar">
+        <div class="chips" id="byteRange" role="group" aria-label="Throughput chart time range">
+          <button type="button" data-range="5m" aria-pressed="false" aria-label="Show 5 minutes">5M</button>
+          <button type="button" data-range="30m" aria-pressed="false" aria-label="Show 30 minutes">30M</button>
+          <button type="button" data-range="2h" aria-pressed="true" aria-label="Show 2 hours">2H</button>
+          <button type="button" data-range="6h" aria-pressed="false" aria-label="Show 6 hours">6H</button>
+          <button type="button" data-range="24h" aria-pressed="false" aria-label="Show 24 hours">24H</button>
+          <button type="button" data-range="7d" aria-pressed="false" aria-label="Show 7 days">7D</button>
+          <button type="button" data-range="30d" aria-pressed="false" aria-label="Show 30 days">30D</button>
+          <button type="button" data-range="all" aria-pressed="false" aria-label="Show all recorded history">ALL</button>
+        </div>
+        <span class="grow"></span>
+        <span class="res-note" id="byteResNote">1m buckets</span>
+      </div>
+      <div class="chart-wrap">
+        <canvas id="byteChart" role="img"
+          aria-label="Line chart of bytes uploaded and downloaded over the selected range."></canvas>
+      </div>
+      <p class="sr-only" id="byteChartSummary" aria-live="polite"></p>
+      <div class="legend" id="byteLegend"></div>
+    </div>
+
+    <h2 class="section">By provider</h2>
+    <div class="card">
+      <div class="table-scroll">
+        <table id="trafficTable">
+          <caption class="sr-only">Data transfer per provider</caption>
+          <thead><tr>
+            <th scope="col">Provider</th><th scope="col" class="num">Up</th>
+            <th scope="col" class="num">Down</th><th scope="col" class="num">Total</th>
+            <th scope="col" class="num">Share</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+
+  <!-- ── ERRORS ───────────────────────────────────────────────────────────── -->
+  <section class="page" id="page-errors" role="tabpanel" aria-labelledby="tab-errors" hidden>
+    <h2 class="section">Failure breakdown</h2>
+    <div class="grid kpis" id="errClassKpis"></div>
+
+    <h2 class="section">What the gateway did about it</h2>
+    <div class="card">
+      <h3>
+        Every failure, newest first
+        <span class="hint">a failure here does not mean your request failed &mdash; the gateway retried</span>
+      </h3>
+      <div class="row" id="errFilter" role="group" aria-label="Filter by error class"></div>
+      <div class="table-scroll" style="margin-top:12px">
+        <table id="errTable">
+          <caption class="sr-only">Recorded failures with class, provider, key and remedy</caption>
+          <thead><tr>
+            <th scope="col">Time</th><th scope="col">Class</th><th scope="col">Provider</th>
+            <th scope="col">Key</th><th scope="col" class="num">HTTP</th>
+            <th scope="col">What happened</th><th scope="col">Gateway action</th>
+            <th scope="col" class="num">Round</th><th scope="col" class="num">Took</th>
+            <th scope="col" class="num">Body</th><th scope="col" class="num">Budget</th>
+            <th scope="col">Egress</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="empty" id="errEmpty" hidden>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>
+        <div>No failures recorded. Nothing has gone wrong yet.</div>
+      </div>
+    </div>
+
+    <h2 class="section">Reference</h2>
+    <div class="card">
+      <h3>What each class means</h3>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th scope="col">Class</th><th scope="col">Cause</th><th scope="col">Gateway response</th><th scope="col">Key retired?</th></tr></thead>
+          <tbody>
+            <tr><td><span class="badge bad">QUOTA</span></td><td>Key balance below the required hold, or overdrawn</td><td>Rotate to the next funded key</td><td>Yes, 6h cooldown</td></tr>
+            <tr><td><span class="badge bad">AUTH</span></td><td>Key invalid or revoked</td><td>Retire the key, rotate</td><td>Yes, 7 days</td></tr>
+            <tr><td><span class="badge warn">RATE</span></td><td>429 &mdash; key is healthy, just busy</td><td>Brief cooldown, try another key</td><td>No</td></tr>
+            <tr><td><span class="badge warn">WAF</span></td><td>Cloudflare challenge / HTML error page. Our IP or UA, not the key</td><td>Fail over to another host</td><td>No &mdash; never blames the key</td></tr>
+            <tr><td><span class="badge warn">UPSTREAM</span></td><td>502 / 524 / 5xx from the provider</td><td>Fail over to another host</td><td>No</td></tr>
+            <tr><td><span class="badge">OFFLINE</span></td><td>No DNS or no route &mdash; this device has no network</td><td>Hold the request and resume when the network returns</td><td>No</td></tr>
+            <tr><td><span class="badge">CLIENT</span></td><td>Bad model name or malformed request</td><td>Pass straight through &mdash; retrying cannot help</td><td>No</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── EGRESS / PROXIES ─────────────────────────────────────────────────── -->
+  <section class="page" id="page-proxies" role="tabpanel" aria-labelledby="tab-proxies" hidden>
+    <h2 class="section">Outbound egress</h2>
+    <div class="grid kpis">
+      <div class="kpi"><span class="kpi-label">Mode</span><div class="kpi-value" id="pxMode" style="font-size:1.125rem">&mdash;</div><div class="kpi-sub" id="pxModeSub">&nbsp;</div></div>
+      <div class="kpi"><span class="kpi-label">Proxies</span><div class="kpi-value num" id="pxCount">&mdash;</div><div class="kpi-sub" id="pxCountSub">&nbsp;</div></div>
+      <div class="kpi"><span class="kpi-label">Rotations</span><div class="kpi-value num" id="pxRot">&mdash;</div><div class="kpi-sub">requests spread across IPs</div></div>
+      <div class="kpi"><span class="kpi-label">Direct fallbacks</span><div class="kpi-value num" id="pxDirect">&mdash;</div><div class="kpi-sub">all proxies were cooling</div></div>
+    </div>
+
+    <div class="card" style="margin-top:12px">
+      <h3>Why this exists <span class="hint">read-only explanation</span></h3>
+      <p style="margin:0;color:var(--fg-dim);font-size:0.875rem;max-width:70ch">
+        Without egress rotation, every key reaches the provider from one device IP.
+        That is the pattern Cloudflare answers with an HTML 502/524 interstitial &mdash;
+        which appears in the Errors tab as <code>UPSTREAM</code>. Rotating egress makes the
+        traffic look like many clients. If every proxy is cooling, the gateway connects
+        <strong>directly</strong> rather than failing your request.
+      </p>
+      <div class="row" style="margin-top:12px">
+        <button class="btn ghost" type="button" id="pxToggle">Toggle proxies</button>
+        <button class="btn ghost" type="button" id="pxReload">Reload proxies.txt</button>
+        <button class="btn ghost" type="button" id="pxMaintain">Vet &amp; refill now</button>
+      </div>
+    </div>
+
+    <h2 class="section">Pool health</h2>
+    <div class="card">
+      <div class="table-scroll">
+        <table id="pxTable">
+          <caption class="sr-only">Per-proxy health</caption>
+          <thead><tr>
+            <th scope="col">Proxy</th><th scope="col">Auth</th>
+            <th scope="col" class="num">OK</th><th scope="col" class="num">Failed</th>
+            <th scope="col" class="num">Connect</th><th scope="col">Status</th><th scope="col">Last error</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── EVENTS ───────────────────────────────────────────────────────────── -->
+  <section class="page" id="page-events" role="tabpanel" aria-labelledby="tab-events" hidden>
+    <h2 class="section">Gateway events</h2>
+    <div class="card">
+      <h3>Newest first <span class="hint">key rotations, failovers, network changes</span></h3>
+      <ul class="events" id="eventList"></ul>
+      <div class="empty" id="eventEmpty" hidden>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
+        <div>Nothing has happened yet. That is the good outcome.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── SETTINGS ─────────────────────────────────────────────────────────── -->
+  <section class="page" id="page-settings" role="tabpanel" aria-labelledby="tab-settings" hidden>
+    <h2 class="section">Providers</h2>
+    <div class="grid cards" id="settingsProviderCards"></div>
+    <div class="settings-actions" style="margin-top:var(--s3);display:flex;gap:var(--s2);flex-wrap:wrap">
+      <button class="btn primary" id="addProviderBtn" type="button">+ Add provider</button>
+    </div>
+
+    <h2 class="section">Routing policy</h2>
+    <div id="settingsRouting"></div>
+
+    <div class="settings-save" style="margin-top:var(--s4);display:flex;align-items:center;gap:var(--s3)">
+      <button class="btn primary" id="saveSettingsBtn" type="button">Save settings</button>
+      <span class="note" id="settingsStatus"></span>
+    </div>
+  </section>
+
+</main>
+
+
+  <!-- Session detail. A dialog rather than a new page so the table keeps its
+       scroll position (state-preservation), and Escape/backdrop both close it. -->
+  <div class="drawer-backdrop" id="sdBackdrop" hidden></div>
+  <aside class="drawer" id="sdDrawer" role="dialog" aria-modal="true" aria-labelledby="sdTitle" hidden>
+    <header>
+      <h3 id="sdTitle">Session</h3>
+      <button class="btn ghost" type="button" id="sdClose" aria-label="Close session detail">Close</button>
+    </header>
+    <div id="sdBody"></div>
+  </aside>
+
+<!-- ══ APPEARANCE PANEL ═══════════════════════════════════════════════════
+     role="dialog" + aria-modal="false": it is a popover, not a modal. The page
+     stays interactive and the back button is untouched, but focus is still
+     trapped inside while open so keyboard users are not dropped behind it. -->
+<button class="panel-backdrop" id="panelBackdrop" hidden tabindex="-1" aria-hidden="true"></button>
+
+<div class="panel" id="appearancePanel" role="dialog" aria-modal="false"
+     aria-labelledby="appearanceTitle" hidden>
+  <div class="panel-head">
+    <h2 id="appearanceTitle">Display</h2>
+    <button class="panel-close" id="panelClose" type="button" aria-label="Close display settings">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
+    </button>
+  </div>
+
+  <fieldset class="setting">
+    <legend>Theme</legend>
+    <div class="seg wrap" id="setTheme">
+      <input type="radio" name="theme" id="theme-dark" value="dark"><label for="theme-dark">Dark</label>
+      <input type="radio" name="theme" id="theme-midnight" value="midnight"><label for="theme-midnight">Midnight</label>
+      <input type="radio" name="theme" id="theme-slate" value="slate"><label for="theme-slate">Slate</label>
+      <input type="radio" name="theme" id="theme-light" value="light"><label for="theme-light">Light</label>
+      <input type="radio" name="theme" id="theme-contrast" value="contrast"><label for="theme-contrast">Contrast</label>
+    </div>
+    <p class="note">Midnight suits OLED screens. Contrast raises every pairing to AAA.</p>
+  </fieldset>
+
+  <fieldset class="setting">
+    <legend>Accent</legend>
+    <div class="swatches" id="setAccent">
+      <input type="radio" name="accent" id="accent-green" value="green"><label for="accent-green" title="Green"><i style="background:hsl(142 71% 45%)"></i><span class="sr-only">Green</span></label>
+      <input type="radio" name="accent" id="accent-cyan" value="cyan"><label for="accent-cyan" title="Cyan"><i style="background:hsl(190 85% 45%)"></i><span class="sr-only">Cyan</span></label>
+      <input type="radio" name="accent" id="accent-indigo" value="indigo"><label for="accent-indigo" title="Indigo"><i style="background:hsl(245 72% 45%)"></i><span class="sr-only">Indigo</span></label>
+      <input type="radio" name="accent" id="accent-violet" value="violet"><label for="accent-violet" title="Violet"><i style="background:hsl(265 75% 45%)"></i><span class="sr-only">Violet</span></label>
+      <input type="radio" name="accent" id="accent-amber" value="amber"><label for="accent-amber" title="Amber"><i style="background:hsl(38 92% 45%)"></i><span class="sr-only">Amber</span></label>
+      <input type="radio" name="accent" id="accent-rose" value="rose"><label for="accent-rose" title="Rose"><i style="background:hsl(348 78% 45%)"></i><span class="sr-only">Rose</span></label>
+    </div>
+  </fieldset>
+
+  <fieldset class="setting">
+    <legend>Density</legend>
+    <div class="seg" id="setDensity">
+      <input type="radio" name="density" id="den-comfortable" value="comfortable"><label for="den-comfortable">Roomy</label>
+      <input type="radio" name="density" id="den-standard" value="standard"><label for="den-standard">Standard</label>
+      <input type="radio" name="density" id="den-compact" value="compact"><label for="den-compact">Compact</label>
+    </div>
+    <p class="note">Affects spacing and text size. Tap targets stay at least 44px in every mode.</p>
+  </fieldset>
+
+  <fieldset class="setting">
+    <legend>Motion</legend>
+    <div class="seg" id="setMotion">
+      <input type="radio" name="motion" id="mo-full" value="full"><label for="mo-full">Full</label>
+      <input type="radio" name="motion" id="mo-calm" value="calm"><label for="mo-calm">Calm</label>
+      <input type="radio" name="motion" id="mo-off" value="off"><label for="mo-off">Off</label>
+    </div>
+    <p class="note" id="motionNote">Calm keeps transitions but drops looping effects.</p>
+  </fieldset>
+
+  <fieldset class="setting">
+    <legend>Chart quality</legend>
+    <div class="seg" id="setQuality">
+      <input type="radio" name="quality" id="q-high" value="high"><label for="q-high">High</label>
+      <input type="radio" name="quality" id="q-balanced" value="balanced"><label for="q-balanced">Balanced</label>
+      <input type="radio" name="quality" id="q-low" value="low"><label for="q-low">Low</label>
+    </div>
+    <p class="note">High adds gradient glow. Low draws straight lines only — cheapest on battery. Same data in all three.</p>
+  </fieldset>
+
+  <fieldset class="setting">
+    <legend>Update speed</legend>
+    <div class="seg" id="setSpeed">
+      <input type="radio" name="speed" id="sp-fast" value="fast"><label for="sp-fast">Fast</label>
+      <input type="radio" name="speed" id="sp-moderate" value="moderate"><label for="sp-moderate">Moderate</label>
+      <input type="radio" name="speed" id="sp-slow" value="slow"><label for="sp-slow">Slow</label>
+    </div>
+    <p class="note" id="speedNote">How often the view repaints. The gateway still pushes every change; this only limits redraw work.</p>
+  </fieldset>
+
+  <button class="btn ghost" id="resetDisplay" type="button" style="width:100%">
+    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 9-9 9 9 0 0 0-6.4 2.6L3 8"/><path d="M3 3v5h5"/></svg>
+    Reset to defaults
+  </button>
+</div>
+
+<div class="toasts" id="toasts" aria-live="polite" aria-atomic="false"></div>
+
+<script type="module" src="/app.js"></script>
+</body>
+</html>

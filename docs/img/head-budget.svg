@@ -1,0 +1,110 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 560" width="880" height="560" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">
+  <title>Head budget: why a fixed timeout cannot work</title>
+  <desc>Measured time-to-first-byte rises linearly with request size, from 11.9s at 281KB to 99.4s at 2.70MB. A fixed 45s budget serves small requests and makes large ones arithmetically impossible.</desc>
+
+  <style>
+    .bg   { fill: #0d1117; }
+    .t    { fill: #e6edf3; font-size: 13px; }
+    .tb   { fill: #e6edf3; font-size: 14px; font-weight: 600; }
+    .dim  { fill: #8b949e; font-size: 11px; }
+    .lbl  { fill: #7d8590; font-size: 10px; letter-spacing: .08em; }
+    .grid { stroke: #21262d; stroke-width: 1; }
+    .axis { stroke: #484f58; stroke-width: 1.4; }
+    .meas { stroke: #3fb950; stroke-width: 2; fill: none; }
+    .old  { stroke: #f85149; stroke-width: 2; fill: none; stroke-dasharray: 6 4; }
+    .now  { stroke: #3b82f6; stroke-width: 2; fill: none; }
+    .cap  { stroke: #d29922; stroke-width: 1.6; fill: none; stroke-dasharray: 4 3; }
+    .ptx  { fill: #3fb950; font-size: 11px; }
+    .bad  { fill: #f85149; font-size: 11px; }
+    .good { fill: #3b82f6; font-size: 11px; }
+    .warn { fill: #d29922; font-size: 11px; }
+  </style>
+
+  <rect class="bg" x="0" y="0" width="880" height="560"/>
+
+  <text class="tb"  x="60" y="34">Time-to-first-byte against request size — all points measured</text>
+  <text class="dim" x="60" y="52">Same provider, same key, streaming. Only the body size changes.</text>
+
+  <!-- plot frame: x 90..640, y 90..400 -->
+  <line class="grid" x1="90" y1="400" x2="640" y2="400"/>
+  <line class="grid" x1="90" y1="338" x2="640" y2="338"/>
+  <line class="grid" x1="90" y1="276" x2="640" y2="276"/>
+  <line class="grid" x1="90" y1="214" x2="640" y2="214"/>
+  <line class="grid" x1="90" y1="152" x2="640" y2="152"/>
+  <line class="grid" x1="90" y1="90"  x2="640" y2="90"/>
+
+  <line class="axis" x1="90" y1="90" x2="90" y2="400"/>
+  <line class="axis" x1="90" y1="400" x2="640" y2="400"/>
+
+  <text class="dim" x="58" y="404">0s</text>
+  <text class="dim" x="52" y="342">40s</text>
+  <text class="dim" x="52" y="280">80s</text>
+  <text class="dim" x="46" y="218">120s</text>
+  <text class="dim" x="46" y="156">160s</text>
+  <text class="dim" x="46" y="94">200s</text>
+
+  <text class="dim" x="84"  y="420">0</text>
+  <text class="dim" x="180" y="420">0.5MB</text>
+  <text class="dim" x="290" y="420">1.0MB</text>
+  <text class="dim" x="400" y="420">1.5MB</text>
+  <text class="dim" x="510" y="420">2.0MB</text>
+  <text class="dim" x="600" y="420">2.7MB</text>
+
+  <!-- measured TTFB: 2.0s + 35.2s/MB. y = 400 - ttfb*1.55 ; x = 90 + MB*205 -->
+  <path class="meas" d="M90 397 L 640 246"/>
+
+  <!-- the three measured points -->
+  <circle cx="146" cy="382" r="4.5" fill="#3fb950"/>
+  <text class="ptx" x="156" y="379">281KB → 11.9s</text>
+
+  <circle cx="276" cy="345" r="4.5" fill="#3fb950"/>
+  <text class="ptx" x="286" y="342">952KB → 35.5s</text>
+
+  <circle cx="640" cy="246" r="4.5" fill="#3fb950"/>
+  <text class="ptx" x="500" y="238">2.70MB → 95.3s, 99.4s</text>
+
+  <!-- old fixed 45s budget -->
+  <line class="old" x1="90" y1="330" x2="640" y2="330"/>
+  <text class="bad" x="96" y="324">old budget: fixed 45s — same for every request</text>
+
+  <!-- shaded impossible region marker -->
+  <text class="bad" x="330" y="300">above this line, no key can ever succeed</text>
+  <path class="old" d="M320 296 L 300 310" marker-end="none"/>
+
+  <!-- ceiling -->
+  <line class="cap" x1="90" y1="137" x2="640" y2="137"/>
+  <text class="warn" x="96" y="131">CDN edge answers for the origin ≈128–140s — beyond is dead air</text>
+
+  <!-- new computed budget: (2 + 35.2*MB + 15) * 1.35 clamped 45..170 -->
+  <path class="now" d="M90 330 L 150 330 L 640 133"/>
+  <text class="good" x="404" y="176">computed budget — tracks the request</text>
+
+  <!-- right panel -->
+  <text class="lbl" x="676" y="96">THE FAILURE</text>
+  <text class="dim" x="676" y="118">A 281KB and a 2.70MB</text>
+  <text class="dim" x="676" y="133">request were handed the</text>
+  <text class="dim" x="676" y="148">identical 45s.</text>
+
+  <text class="dim" x="676" y="176">The small one needed 12s</text>
+  <text class="dim" x="676" y="191">and passed.</text>
+
+  <text class="bad" x="676" y="216">The large one needed 97s</text>
+  <text class="bad" x="676" y="231">and could not pass on</text>
+  <text class="bad" x="676" y="246">any key, ever.</text>
+
+  <text class="dim" x="676" y="274">Not slow. Arithmetically</text>
+  <text class="dim" x="676" y="289">impossible.</text>
+
+  <text class="lbl" x="676" y="322">ONE FAILED TURN</text>
+  <text class="dim" x="676" y="344">12 attempts</text>
+  <text class="dim" x="676" y="359">487s wall clock</text>
+  <text class="dim" x="676" y="374">~32MB uploaded</text>
+  <text class="bad" x="676" y="389">0 tokens returned</text>
+
+  <!-- formula -->
+  <text class="lbl" x="60" y="462">THE FIX</text>
+  <text class="t"   x="60" y="486">budget = clamp( ewma_ttfb × 3.0  +  (35.2 × req_MB + 15.0) × 1.35 ,  45 , 170 )</text>
+  <text class="dim" x="60" y="508">35.2 s/MB measured · 15.0s is the gateway's own buffer-and-forward cost, measured by paired A/B</text>
+  <text class="dim" x="60" y="524">An earlier revision used 20.3 s/MB — fitted to a point that was a failure, not a measurement. 42% too low.</text>
+  <text class="dim" x="60" y="540">It only appeared to work because the safety factor was 2.0 and absorbed the error.</text>
+</svg>

@@ -1,0 +1,148 @@
+name: Release
+
+# Tag-only. This is the one place the expensive release profile is paid for, and
+# the one place the full platform matrix is unconditional — a release artifact
+# that was never built on the platform it claims to support is worse than no
+# artifact.
+#
+# CI deliberately gates its cross-platform matrix behind a label. That is safe
+# precisely because this workflow exists: nothing ships without every target
+# having been built here.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (dry run — no release is published)'
+        required: true
+
+# Releases are not cancelled. A half-uploaded set of artifacts is worse than a
+# duplicated build, so there is no `concurrency` block here on purpose.
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  # Gate on the test suite before spending ~5 platform builds on the expensive
+  # profile. Cheap insurance: one 3-minute debug run can save five 20-minute
+  # release builds when someone tags a broken commit.
+  verify:
+    name: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked
+
+  build:
+    name: ${{ matrix.target }}
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    # lto + codegen-units=1 + opt-level=z is slow by design. Generous ceiling.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # aarch64 Linux needs a cross-linker; the others build natively.
+      - name: Install cross-linker
+        if: matrix.cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo 'CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc' >> "$GITHUB_ENV"
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="tabi-gateway-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          cp "target/${{ matrix.target }}/release/tabi-gateway" "dist/$name/"
+          # Ship the dashboard and the installer alongside the binary: the binary
+          # serves web/ from disk, so an archive without it is a broken product.
+          cp -r web "dist/$name/"
+          cp README.md LICENSE install.sh "dist/$name/"
+          tar -C dist -czf "$name.tar.gz" "$name"
+          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $name = "tabi-gateway-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force -Path "dist/$name" | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/tabi-gateway.exe" "dist/$name/"
+          Copy-Item -Recurse web "dist/$name/web"
+          Copy-Item README.md, LICENSE, install.ps1 "dist/$name/"
+          Compress-Archive -Path "dist/$name" -DestinationPath "$name.zip"
+          (Get-FileHash "$name.zip" -Algorithm SHA256).Hash.ToLower() +
+            "  $name.zip" | Out-File "$name.zip.sha256" -Encoding ascii
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tabi-gateway-${{ matrix.target }}
+          path: |
+            *.tar.gz
+            *.zip
+            *.sha256
+          retention-days: 7
+
+  publish:
+    name: publish
+    needs: build
+    # Only for a real tag. A workflow_dispatch run builds and uploads artifacts
+    # for inspection but must never create a GitHub release.
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: dist
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256
+          generate_release_notes: true
+          draft: false

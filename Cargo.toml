@@ -1,0 +1,26 @@
+[package]
+name = "tabi-gateway"
+version = "1.0.0"
+edition = "2021"
+description = "Multi-provider AI gateway: key pool rotation, live dashboard, zero-credit uptime probing"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "io-util", "sync", "fs", "signal", "process"] }
+hyper = { version = "1", features = ["server", "client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "client", "client-legacy", "http1"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "ring", "webpki-tokio", "tls12"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+http-body-util = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bytes = "1"
+webpki-roots = "1"
+futures-core = "0.3"
+tower-service = "0.3"
+
+[profile.release]
+opt-level = "z"     # optimise for size -> smaller resident set -> less battery
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

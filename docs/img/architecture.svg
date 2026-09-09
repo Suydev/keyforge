@@ -1,0 +1,117 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 470" width="880" height="470" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">
+  <title>Tabi Gateway architecture</title>
+  <desc>Clients speak Anthropic or OpenAI wire formats to a local gateway on 127.0.0.1:8787. The gateway classifies errors, rotates keys, and egresses through a rotating proxy pool to several upstream providers.</desc>
+
+  <style>
+    .bg    { fill: #0d1117; }
+    .panel { fill: #161b22; stroke: #30363d; stroke-width: 1; rx: 6; }
+    .accent{ fill: #1f2937; stroke: #3b82f6; stroke-width: 1.5; rx: 6; }
+    .t     { fill: #e6edf3; font-size: 13px; }
+    .tb    { fill: #e6edf3; font-size: 13px; font-weight: 600; }
+    .dim   { fill: #8b949e; font-size: 11px; }
+    .lbl   { fill: #7d8590; font-size: 10px; letter-spacing: .08em; }
+    .ok    { fill: #3fb950; font-size: 11px; }
+    .warn  { fill: #d29922; font-size: 11px; }
+    .arrow { stroke: #484f58; stroke-width: 1.4; fill: none; marker-end: url(#a); }
+    .flow  { stroke: #3b82f6; stroke-width: 1.6; fill: none; marker-end: url(#ab); }
+  </style>
+
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#484f58"/>
+    </marker>
+    <marker id="ab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#3b82f6"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="880" height="470"/>
+
+  <!-- clients -->
+  <text class="lbl" x="24" y="30">CLIENTS</text>
+  <rect class="panel" x="24" y="42" width="150" height="46"/>
+  <text class="tb"  x="38" y="62">Claude Code</text>
+  <text class="dim" x="38" y="78">/v1/messages</text>
+
+  <rect class="panel" x="24" y="98" width="150" height="46"/>
+  <text class="tb"  x="38" y="118">OpenCode</text>
+  <text class="dim" x="38" y="134">/v1/chat/completions</text>
+
+  <rect class="panel" x="24" y="154" width="150" height="46"/>
+  <text class="tb"  x="38" y="174">curl / other</text>
+  <text class="dim" x="38" y="190">either surface</text>
+
+  <!-- gateway -->
+  <text class="lbl" x="234" y="30">GATEWAY — 127.0.0.1:8787</text>
+  <rect class="accent" x="234" y="42" width="290" height="290"/>
+
+  <rect class="panel" x="250" y="58" width="258" height="40"/>
+  <text class="tb"  x="264" y="76">router.rs</text>
+  <text class="dim" x="264" y="90">retry ladder · 6 keys → sibling → round 2</text>
+
+  <rect class="panel" x="250" y="106" width="258" height="40"/>
+  <text class="tb"  x="264" y="124">classify.rs</text>
+  <text class="dim" x="264" y="138">8 classes · each acts differently</text>
+
+  <rect class="panel" x="250" y="154" width="258" height="40"/>
+  <text class="tb"  x="264" y="172">state.rs</text>
+  <text class="dim" x="264" y="186">keys · sessions · scores · history</text>
+
+  <rect class="panel" x="250" y="202" width="258" height="40"/>
+  <text class="tb"  x="264" y="220">head budget</text>
+  <text class="dim" x="264" y="234">ewma + body size + link quality</text>
+
+  <rect class="panel" x="250" y="250" width="258" height="40"/>
+  <text class="tb"  x="264" y="268">session.rs</text>
+  <text class="dim" x="264" y="282">one conversation → one key</text>
+
+  <text class="ok"   x="250" y="312">headers written once, after 2xx</text>
+  <text class="dim"  x="250" y="326">→ every retry is invisible to the client</text>
+
+  <!-- egress -->
+  <text class="lbl" x="576" y="30">EGRESS</text>
+  <rect class="panel" x="576" y="42" width="130" height="88"/>
+  <text class="tb"  x="590" y="62">proxy.rs</text>
+  <text class="dim" x="590" y="78">LRU pool</text>
+  <text class="dim" x="590" y="93">health tracked</text>
+  <text class="dim" x="590" y="108">direct fallback</text>
+  <text class="warn" x="590" y="123">limits are per-IP</text>
+
+  <!-- upstreams -->
+  <text class="lbl" x="746" y="30">UPSTREAMS</text>
+  <rect class="panel" x="746" y="42" width="110" height="42"/>
+  <text class="tb"  x="758" y="60">provider A</text>
+  <text class="dim" x="758" y="76">873 keys</text>
+
+  <rect class="panel" x="746" y="94" width="110" height="42"/>
+  <text class="tb"  x="758" y="112">provider B</text>
+  <text class="dim" x="758" y="128">887 keys</text>
+
+  <rect class="panel" x="746" y="146" width="110" height="42"/>
+  <text class="tb"  x="758" y="164">provider C</text>
+  <text class="dim" x="758" y="180">1 key</text>
+
+  <!-- flows -->
+  <path class="flow"  d="M174 65 H 226"/>
+  <path class="flow"  d="M174 121 H 226"/>
+  <path class="flow"  d="M174 177 H 210 V 130 H 226"/>
+  <path class="flow"  d="M524 130 H 568"/>
+  <path class="arrow" d="M706 70 H 738"/>
+  <path class="arrow" d="M706 100 H 722 V 115 H 738"/>
+  <path class="arrow" d="M706 115 H 714 V 167 H 738"/>
+
+  <!-- observability -->
+  <text class="lbl" x="234" y="368">OBSERVABILITY</text>
+  <rect class="panel" x="234" y="380" width="290" height="66"/>
+  <text class="tb"  x="248" y="400">dashboard  ·  /  and /api/stream</text>
+  <text class="dim" x="248" y="416">vanilla JS · SSE pushes only on change</text>
+  <text class="dim" x="248" y="431">paused while the tab is hidden</text>
+  <path class="arrow" d="M379 332 V 374"/>
+
+  <!-- link -->
+  <rect class="panel" x="576" y="380" width="280" height="66"/>
+  <text class="tb"  x="590" y="400">link.rs — local Wi-Fi quality</text>
+  <text class="dim" x="590" y="416">Android: dumpsys score · elsewhere inert</text>
+  <text class="dim" x="590" y="431">a weak radio must not look like a slow provider</text>
+  <path class="arrow" d="M576 413 H 540 V 240 H 524" stroke-dasharray="3 3"/>
+</svg>

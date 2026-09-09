@@ -1,0 +1,1337 @@
+/* Tabi Gateway dashboard — design tokens + layout
+ *
+ * Style: dark technical console (matches the new-api / tabitoken family).
+ * Density 8/10 — this is an operations dashboard, so spacing is 8-32px.
+ * Motion 3/10 — 180-260ms, transform/opacity only, and fully disabled under
+ * prefers-reduced-motion.
+ *
+ * BATTERY: no keyframe animations run continuously anywhere. The only animated
+ * things are one-shot transitions on interaction. No spinners that loop forever.
+ */
+
+:root {
+  /* ── palette primitives ───────────────────────────────────────────────────
+     Raw ramps live here ONLY. Every rule below uses a semantic token, so a new
+     theme is a block of token reassignments and never a search-and-replace
+     through 700 lines of CSS. */
+  --accent-h: 142;
+  --accent-s: 71%;
+  --accent-l: 45%;
+
+  /* ── semantic tokens (dark, default) ──────────────────────────────────── */
+  --bg: #0f172a;
+  --bg-elev: #151f38;
+  --surface: #1a2540;
+  --surface-2: #202c4a;
+  --muted: #272f42;
+  --border: #2c3a5a;
+  --border-strong: #475569;
+
+  --fg: #f8fafc;
+  --fg-dim: #a8b6cf;
+  --fg-faint: #6b7a99;
+
+  /* Accent is derived so the accent picker is one hue change, not ten hexes. */
+  --accent: hsl(var(--accent-h) var(--accent-s) var(--accent-l));
+  --accent-dim: hsl(var(--accent-h) var(--accent-s) calc(var(--accent-l) - 8%));
+  --accent-ink: hsl(var(--accent-h) 80% 8%);
+
+  --info: #38bdf8;
+  --warn: #f59e0b;
+  --danger: #ef4444;
+  --violet: #a78bfa;
+
+  /* Ambient wash behind the header. Kept as a token so themes can remove it. */
+  --glow: hsl(var(--accent-h) var(--accent-s) var(--accent-l) / 0.07);
+  --scrim: rgba(0, 0, 0, 0.5);
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-2: 0 10px 30px rgba(0, 0, 0, 0.45);
+
+  /* provider identity — also distinguished by label + pattern, never colour alone */
+  --p-tabi: #38bdf8;
+  --p-gorouter: #a78bfa;
+  --p-justwoker: #f59e0b;
+
+  /* ── spacing: 4/8px rhythm, overridden per density ────────────────────── */
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 24px;
+  --s6: 32px;
+
+  --r1: 6px;
+  --r2: 10px;
+  --r3: 14px;
+
+  /* Row height and font scale also move with density — spacing alone does not
+     make a table denser if every cell is still 44px tall. */
+  --row-pad: var(--s2);
+  --text-body: 1rem;
+  --text-table: 0.8125rem;
+  --text-kpi: 1.5rem;
+
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Mono", Menlo, monospace;
+  --sans: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+
+  /* ── motion: durations scale as a group so rhythm stays consistent ────── */
+  --ease: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-spring: cubic-bezier(0.34, 1.4, 0.64, 1);
+  --dur-fast: 120ms;
+  --dur: 200ms;
+  --dur-slow: 320ms;
+  /* Exit is ~65% of enter so dismissal feels responsive (skill:
+     exit-faster-than-enter). */
+  --dur-exit: 130ms;
+  /* Multiplier consumed by decorative loops; 0 disables them outright. */
+  --motion-scale: 1;
+
+  /* layered z-index scale */
+  --z-nav: 40;
+  --z-panel: 80;
+  --z-drawer: 95;
+  --z-toast: 100;
+}
+
+/* ══ THEMES ═══════════════════════════════════════════════════════════════
+   Each theme reassigns tokens only. `color-scheme` is set too so native
+   scrollbars, form controls and the caret match — a dark page with a white
+   scrollbar reads as broken.
+
+   Contrast was checked per theme, not inherited from dark: light mode needs
+   genuinely different foregrounds, not inverted ones (skill: color-dark-mode).
+   ═════════════════════════════════════════════════════════════════════════ */
+
+html[data-theme="dark"] { color-scheme: dark; }
+
+/* Midnight: OLED-friendly. Near-black but never #000 — pure black smears on
+   OLED during scroll and crushes the elevation scale to nothing. */
+html[data-theme="midnight"] {
+  color-scheme: dark;
+  --bg: #07090f;
+  --bg-elev: #0c1018;
+  --surface: #11161f;
+  --surface-2: #171d29;
+  --muted: #1b2130;
+  --border: #232b3a;
+  --border-strong: #3a4557;
+  --fg: #f4f7fb;
+  --fg-dim: #9fadc4;
+  --fg-faint: #64718a;
+  --shadow-2: 0 12px 34px rgba(0, 0, 0, 0.7);
+}
+
+/* Slate: lower contrast, warmer. Easier for long sessions than full midnight. */
+html[data-theme="slate"] {
+  color-scheme: dark;
+  --bg: #14161c;
+  --bg-elev: #1a1d25;
+  --surface: #20242e;
+  --surface-2: #282d39;
+  --muted: #2d323e;
+  --border: #353b49;
+  --border-strong: #4d556a;
+  --fg: #f5f6f8;
+  --fg-dim: #b0b7c5;
+  --fg-faint: #757e91;
+}
+
+/* Light: for daylight and for screenshots. Foregrounds are chosen against white
+   (slate-900 / slate-600), not derived by inverting the dark ramp. */
+html[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f6f8fb;
+  --bg-elev: #ffffff;
+  --surface: #ffffff;
+  --surface-2: #f1f5f9;
+  --muted: #e8edf4;
+  --border: #dde4ee;
+  --border-strong: #b6c1d2;
+  --fg: #0f172a;      /* 16.9:1 on --bg */
+  --fg-dim: #475569;  /* 7.5:1  */
+  --fg-faint: #64748b; /* 4.8:1 — still AA for the small caps labels */
+  --accent-l: 38%;    /* darkened so accent text clears 4.5:1 on white */
+  --info: #0284c7;
+  --warn: #b45309;
+  --danger: #dc2626;
+  --violet: #7c3aed;
+  --p-tabi: #0369a1;
+  --p-gorouter: #6d28d9;
+  --p-justwoker: #b45309;
+  --glow: hsl(var(--accent-h) var(--accent-s) var(--accent-l) / 0.06);
+  --scrim: rgba(15, 23, 42, 0.42);
+  --shadow-1: 0 1px 2px rgba(15, 23, 42, 0.07);
+  --shadow-2: 0 12px 30px rgba(15, 23, 42, 0.14);
+}
+
+/* High contrast: for glare and for low vision. Every pairing here is >=7:1
+   (AAA), borders are full-strength, and decorative translucency is removed. */
+html[data-theme="contrast"] {
+  color-scheme: dark;
+  --bg: #000205;
+  --bg-elev: #080c14;
+  --surface: #0d1220;
+  --surface-2: #141b2c;
+  --muted: #1a2234;
+  --border: #55617a;
+  --border-strong: #8b98b0;
+  --fg: #ffffff;
+  --fg-dim: #e2e8f2;
+  --fg-faint: #b9c3d4;
+  --accent-l: 58%;
+  --info: #7dd3fc;
+  --warn: #fcd34d;
+  --danger: #fca5a5;
+  --glow: transparent;
+}
+
+/* ── ACCENTS ──────────────────────────────────────────────────────────────
+   One hue rotation each. Lightness is per-theme (set above), so an accent stays
+   readable in light mode without a second table of hexes. */
+html[data-accent="green"]  { --accent-h: 142; --accent-s: 71%; }
+html[data-accent="cyan"]   { --accent-h: 190; --accent-s: 85%; }
+html[data-accent="indigo"] { --accent-h: 245; --accent-s: 72%; }
+html[data-accent="violet"] { --accent-h: 265; --accent-s: 75%; }
+html[data-accent="amber"]  { --accent-h: 38;  --accent-s: 92%; }
+html[data-accent="rose"]   { --accent-h: 348; --accent-s: 78%; }
+
+/* ── DENSITY ──────────────────────────────────────────────────────────────
+   Spacing, row padding and type scale move together. Touch targets do NOT
+   shrink below 44px in any mode — density is about information, not about
+   making things harder to hit (skill: touch-target-size). */
+html[data-density="comfortable"] {
+  --s1: 5px; --s2: 10px; --s3: 16px; --s4: 22px; --s5: 32px; --s6: 44px;
+  --row-pad: var(--s3);
+  --text-table: 0.875rem;
+  --text-kpi: 1.625rem;
+}
+html[data-density="compact"] {
+  --s1: 3px; --s2: 6px; --s3: 9px; --s4: 12px; --s5: 18px; --s6: 24px;
+  --row-pad: 5px;
+  --text-table: 0.75rem;
+  --text-kpi: 1.375rem;
+}
+
+/* ── MOTION ───────────────────────────────────────────────────────────────
+   Three tiers. `full` adds the decorative loops (beam, shimmer); `calm` keeps
+   only functional transitions; `off` removes motion entirely and is what
+   prefers-reduced-motion maps onto. */
+html[data-motion="full"] {
+  --dur-fast: 140ms; --dur: 240ms; --dur-slow: 380ms; --dur-exit: 155ms;
+  --motion-scale: 1;
+}
+html[data-motion="calm"] {
+  --dur-fast: 100ms; --dur: 160ms; --dur-slow: 220ms; --dur-exit: 105ms;
+  --motion-scale: 0;
+}
+html[data-motion="off"] {
+  --dur-fast: 1ms; --dur: 1ms; --dur-slow: 1ms; --dur-exit: 1ms;
+  --motion-scale: 0;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--sans);
+  /* 16px base prevents mobile auto-zoom */
+  font-size: 16px;
+  line-height: 1.5;
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  min-height: 100dvh;
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+/* Tabular figures everywhere numbers live, so live updates never reflow. */
+.num, td.num, .kpi-value, .mono {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+
+/* ── header ──────────────────────────────────────────────────────────────── */
+
+header.top {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-nav);
+  background: rgba(15, 23, 42, 0.94);
+  border-bottom: 1px solid var(--border);
+  padding: var(--s3) var(--s4);
+  padding-top: max(var(--s3), env(safe-area-inset-top));
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  flex-wrap: wrap;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  font-size: 1.0625rem;
+}
+.brand svg { width: 20px; height: 20px; color: var(--accent); flex: none; }
+.brand .sub { color: var(--fg-faint); font-weight: 500; font-size: 0.8125rem; }
+
+.spacer { flex: 1 1 auto; }
+
+/* connection pill: state is conveyed by icon + text, not colour alone */
+.conn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: var(--s1) var(--s3);
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: var(--fg-dim);
+  min-height: 32px;
+}
+.conn .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--fg-faint); flex: none; }
+.conn[data-state="live"]      { border-color: var(--accent-dim); color: var(--accent); }
+.conn[data-state="live"] .dot { background: var(--accent); }
+.conn[data-state="paused"]      { border-color: var(--warn); color: var(--warn); }
+.conn[data-state="paused"] .dot { background: var(--warn); }
+.conn[data-state="offline"]      { border-color: var(--danger); color: var(--danger); }
+.conn[data-state="offline"] .dot { background: var(--danger); }
+
+/* ── nav tabs ────────────────────────────────────────────────────────────── */
+
+nav.tabs {
+  display: flex;
+  gap: var(--s1);
+  overflow-x: auto;
+  scrollbar-width: none;
+  padding: var(--s2) var(--s4);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elev);
+  position: sticky;
+  top: 57px;
+  z-index: var(--z-nav);
+}
+nav.tabs::-webkit-scrollbar { display: none; }
+
+nav.tabs button {
+  /* >=44px touch target */
+  min-height: 44px;
+  padding: var(--s2) var(--s4);
+  border: 1px solid transparent;
+  border-radius: var(--r1);
+  background: transparent;
+  color: var(--fg-dim);
+  font: inherit;
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+nav.tabs button svg { width: 16px; height: 16px; flex: none; }
+nav.tabs button:hover { background: var(--surface); color: var(--fg); }
+nav.tabs button[aria-selected="true"] {
+  background: var(--surface-2);
+  color: var(--fg);
+  border-color: var(--border-strong);
+}
+/* current location marked by more than colour */
+nav.tabs button[aria-selected="true"]::after {
+  content: "";
+  width: 5px; height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+:focus-visible {
+  outline: 2px solid var(--info);
+  outline-offset: 2px;
+  border-radius: var(--r1);
+}
+
+/* ── layout ──────────────────────────────────────────────────────────────── */
+
+main { padding: var(--s4); max-width: 1600px; margin: 0 auto; }
+.page[hidden] { display: none; }
+
+h2.section {
+  margin: var(--s5) 0 var(--s3);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+}
+h2.section:first-child { margin-top: 0; }
+
+.grid { display: grid; gap: var(--s3); }
+.grid.kpis  { grid-template-columns: repeat(auto-fit, minmax(158px, 1fr)); }
+.grid.cards { grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+.grid.two   { grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); }
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r2);
+  padding: var(--s4);
+}
+.card > h3 {
+  margin: 0 0 var(--s3);
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--fg);
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+}
+.card > h3 .hint { font-weight: 400; color: var(--fg-faint); font-size: 0.75rem; }
+
+/* ── KPI tiles ───────────────────────────────────────────────────────────── */
+
+.kpi {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r2);
+  padding: var(--s3) var(--s4);
+}
+.kpi-label {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+  display: block;
+  margin-bottom: var(--s1);
+}
+.kpi-value { font-size: var(--text-kpi); font-weight: 600; letter-spacing: -0.02em; line-height: 1.2; }
+.kpi-sub { font-size: 0.75rem; color: var(--fg-dim); margin-top: 2px; }
+.kpi.good .kpi-value { color: var(--accent); }
+.kpi.warn .kpi-value { color: var(--warn); }
+.kpi.bad  .kpi-value { color: var(--danger); }
+
+/* ── charts ──────────────────────────────────────────────────────────────── */
+
+.chart-wrap {
+  position: relative;
+  width: 100%;
+  /* reserve space so a late render cannot shift layout (CLS) */
+  aspect-ratio: 16 / 6;
+  min-height: 140px;
+}
+@media (max-width: 640px) { .chart-wrap { aspect-ratio: 4 / 3; } }
+.chart-wrap canvas { width: 100%; height: 100%; display: block; }
+
+.legend { display: flex; flex-wrap: wrap; gap: var(--s3); margin-top: var(--s2); }
+.legend button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  background: none;
+  border: 0;
+  padding: var(--s1) var(--s2);
+  min-height: 32px;
+  color: var(--fg-dim);
+  font: inherit;
+  font-size: 0.75rem;
+  cursor: pointer;
+  border-radius: var(--r1);
+  transition: color var(--dur) var(--ease);
+}
+.legend button:hover { color: var(--fg); }
+.legend button[aria-pressed="false"] { opacity: 0.42; text-decoration: line-through; }
+.legend .swatch { width: 12px; height: 3px; border-radius: 2px; flex: none; }
+.legend .swatch.dashed { background-image: repeating-linear-gradient(90deg, currentColor 0 4px, transparent 4px 7px); }
+
+/* ── uptime timeline ─────────────────────────────────────────────────────── */
+
+.uptime-row { margin-bottom: var(--s4); }
+.uptime-head {
+  display: flex; align-items: baseline; gap: var(--s2);
+  margin-bottom: var(--s2); font-size: 0.8125rem;
+}
+.uptime-head .name { font-weight: 600; }
+.uptime-head .pct { margin-left: auto; font-family: var(--mono); }
+
+/* Bars are 4px wide with a 1px gap; each is one probe sample. */
+.uptime-bars {
+  display: flex;
+  gap: 1px;
+  height: 34px;
+  align-items: stretch;
+  overflow: hidden;
+  border-radius: var(--r1);
+  background: var(--muted);
+  padding: 2px;
+}
+.uptime-bars i {
+  flex: 1 1 3px;
+  min-width: 2px;
+  border-radius: 1px;
+  background: var(--border-strong);
+}
+.uptime-bars i[data-up="1"] { background: var(--accent); }
+.uptime-bars i[data-up="0"] { background: var(--danger); }
+.uptime-bars i[data-up="x"] { background: var(--muted); }
+.uptime-scale {
+  display: flex; justify-content: space-between;
+  font-size: 0.6875rem; color: var(--fg-faint);
+  margin-top: var(--s1); font-family: var(--mono);
+}
+
+/* ── tables ──────────────────────────────────────────────────────────────── */
+
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table { width: 100%; border-collapse: collapse; font-size: var(--text-table); }
+thead th {
+  text-align: left;
+  padding: var(--row-pad) var(--s3);
+  border-bottom: 1px solid var(--border-strong);
+  color: var(--fg-faint);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  position: sticky; top: 0;
+  background: var(--surface);
+}
+tbody td {
+  padding: var(--row-pad) var(--s3);
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+tbody tr:last-child td { border-bottom: 0; }
+td.num, th.num { text-align: right; }
+tbody tr:hover { background: var(--surface-2); }
+
+/* ── badges / chips ──────────────────────────────────────────────────────── */
+
+.badge {
+  display: inline-flex; align-items: center; gap: var(--s1);
+  padding: 2px var(--s2);
+  border-radius: var(--r1);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  border: 1px solid var(--border-strong);
+  color: var(--fg-dim);
+  white-space: nowrap;
+}
+.badge.ok      { color: var(--accent); border-color: var(--accent-dim); }
+.badge.warn    { color: var(--warn);   border-color: var(--warn); }
+.badge.bad     { color: var(--danger); border-color: var(--danger); }
+.badge.tabi     { color: var(--p-tabi);     border-color: var(--p-tabi); }
+.badge.gorouter { color: var(--p-gorouter); border-color: var(--p-gorouter); }
+
+/* ── forms ───────────────────────────────────────────────────────────────── */
+
+.field { margin-bottom: var(--s3); }
+.field label {
+  display: block;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  margin-bottom: var(--s1);
+  color: var(--fg);
+}
+.field .help { font-size: 0.75rem; color: var(--fg-faint); margin-top: var(--s1); }
+
+input[type="text"], input[type="password"] {
+  width: 100%;
+  min-height: 44px;
+  padding: var(--s2) var(--s3);
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r1);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 0.875rem;
+  transition: border-color var(--dur) var(--ease);
+}
+input:focus { border-color: var(--info); outline: none; box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.14); }
+input::placeholder { color: var(--fg-faint); }
+
+.row { display: flex; gap: var(--s2); align-items: stretch; flex-wrap: wrap; }
+.row > input { flex: 1 1 260px; }
+
+button.btn {
+  min-height: 44px;
+  padding: var(--s2) var(--s5);
+  border-radius: var(--r1);
+  border: 1px solid var(--accent-dim);
+  background: var(--accent-dim);
+  color: #04220f;
+  font: inherit;
+  font-weight: 600;
+  font-size: 0.875rem;
+  cursor: pointer;
+  transition: transform var(--dur) var(--ease), background var(--dur) var(--ease), opacity var(--dur) var(--ease);
+  touch-action: manipulation;
+  display: inline-flex; align-items: center; justify-content: center; gap: var(--s2);
+}
+button.btn:hover { background: var(--accent); }
+button.btn:active { transform: scale(0.98); }
+button.btn.ghost {
+  background: transparent;
+  color: var(--fg-dim);
+  border-color: var(--border-strong);
+}
+button.btn.ghost:hover { background: var(--surface-2); color: var(--fg); }
+button.btn[disabled] { opacity: 0.45; cursor: not-allowed; }
+button.btn[disabled]:active { transform: none; }
+
+/* inline spinner: only exists while a request is in flight */
+.spin {
+  width: 14px; height: 14px; flex: none;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: spin 700ms linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* result panel for key verification */
+.result {
+  margin-top: var(--s3);
+  padding: var(--s3);
+  border-radius: var(--r1);
+  border: 1px solid var(--border-strong);
+  background: var(--bg);
+  font-size: 0.8125rem;
+}
+.result[data-kind="ok"]   { border-color: var(--accent-dim); }
+.result[data-kind="bad"]  { border-color: var(--danger); }
+.result .title { font-weight: 600; display: flex; align-items: center; gap: var(--s2); margin-bottom: var(--s1); }
+.result dl { margin: var(--s2) 0 0; display: grid; grid-template-columns: auto 1fr; gap: var(--s1) var(--s3); }
+.result dt { color: var(--fg-faint); font-size: 0.75rem; }
+.result dd { margin: 0; font-family: var(--mono); font-size: 0.75rem; }
+
+/* ── events ──────────────────────────────────────────────────────────────── */
+
+.events { list-style: none; margin: 0; padding: 0; }
+.events li {
+  display: flex; gap: var(--s3);
+  padding: var(--s2) 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.8125rem;
+}
+.events li:last-child { border-bottom: 0; }
+.events time { color: var(--fg-faint); font-family: var(--mono); font-size: 0.75rem; flex: none; }
+.events .lvl { flex: none; font-weight: 700; font-size: 0.6875rem; letter-spacing: 0.05em; }
+.events li[data-level="info"]  .lvl { color: var(--info); }
+.events li[data-level="warn"]  .lvl { color: var(--warn); }
+.events li[data-level="error"] .lvl { color: var(--danger); }
+
+/* ── empty / offline states ──────────────────────────────────────────────── */
+
+.empty {
+  padding: var(--s6) var(--s4);
+  text-align: center;
+  color: var(--fg-faint);
+  font-size: 0.875rem;
+}
+.empty svg { width: 28px; height: 28px; margin-bottom: var(--s2); opacity: 0.6; }
+
+.banner {
+  display: flex; align-items: center; gap: var(--s3);
+  padding: var(--s3) var(--s4);
+  border-radius: var(--r2);
+  border: 1px solid var(--warn);
+  background: rgba(245, 158, 11, 0.09);
+  color: var(--fg);
+  font-size: 0.875rem;
+  margin-bottom: var(--s4);
+}
+.banner svg { width: 20px; height: 20px; color: var(--warn); flex: none; }
+.banner[hidden] { display: none; }
+
+/* ── toast ───────────────────────────────────────────────────────────────── */
+
+.toasts {
+  position: fixed;
+  left: 50%;
+  bottom: calc(var(--s5) + env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  z-index: var(--z-toast);
+  display: flex; flex-direction: column; gap: var(--s2);
+  width: min(560px, calc(100vw - 32px));
+  pointer-events: none;
+}
+.toast {
+  display: flex; align-items: center; gap: var(--s3);
+  padding: var(--s3) var(--s4);
+  border-radius: var(--r2);
+  border: 1px solid var(--border-strong);
+  background: var(--surface-2);
+  font-size: 0.875rem;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+  transition: opacity var(--dur) var(--ease), transform var(--dur) var(--ease);
+}
+.toast[data-kind="warn"]  { border-color: var(--warn); }
+.toast[data-kind="error"] { border-color: var(--danger); }
+.toast svg { width: 18px; height: 18px; flex: none; }
+.toast.leaving { opacity: 0; transform: translateY(8px); }
+
+/* ── a11y helpers ────────────────────────────────────────────────────────── */
+
+.sr-only {
+  position: absolute; width: 1px; height: 1px;
+  padding: 0; margin: -1px; overflow: hidden;
+  clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+.skip {
+  position: absolute; left: -9999px; top: 0;
+  background: var(--accent-dim); color: #04220f;
+  padding: var(--s2) var(--s4); border-radius: var(--r1);
+  z-index: 200; font-weight: 600;
+}
+.skip:focus { left: var(--s3); top: var(--s3); }
+
+/* System preference wins over the in-app setting: someone who set
+   prefers-reduced-motion at OS level has already answered this question
+   (skill: reduced-motion). The token override kills decorative loops; the
+   !important block is the belt-and-braces for anything that hardcoded a
+   duration. */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-fast: 1ms; --dur: 1ms; --dur-slow: 1ms; --dur-exit: 1ms;
+    --motion-scale: 0;
+  }
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ── tab badge ───────────────────────────────────────────────────────────── */
+/* Used sparingly (skill: tab-badge) — only the Errors tab carries one, and it
+   clears when you visit the tab. */
+.tab-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--danger);
+  color: #fff;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.tab-badge[hidden] { display: none; }
+
+/* ── live phase pill ─────────────────────────────────────────────────────── */
+.phase {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  font-size: 0.75rem;
+  color: var(--fg-dim);
+}
+/* A single 2px pulsing dot is the ONLY continuous animation in the app, and it
+   exists solely while a request is in flight. Cheap, and it stops on its own. */
+.phase .live-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--accent); flex: none;
+  /* Duration 0s => no loop at all when motion is calm/off. The dot stays
+     visible either way, so liveness is never conveyed by motion alone. */
+  animation: pulse calc(1.8s * var(--motion-scale)) ease-in-out infinite;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .phase .live-dot { animation: none; }
+}
+
+/* Rows for in-flight requests get a subtle left marker so they read as active
+   without relying on colour alone. */
+tr.is-live td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+
+/* ── score breakdown bar ─────────────────────────────────────────────────── */
+/* Stacked proportions of the routing score. Each segment also carries a title
+   and the legend below names them, so this is not colour-only. */
+.stack {
+  display: flex;
+  height: 8px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--muted);
+  min-width: 90px;
+}
+.stack i { display: block; height: 100%; }
+.stack i.lat { background: var(--info); }
+.stack i.err { background: var(--danger); }
+.stack i.strk { background: var(--warn); }
+.stack i.brk { background: var(--violet); }
+.stack i.dry { background: var(--fg-faint); }
+.stack-legend { display: flex; gap: var(--s3); flex-wrap: wrap; margin-top: var(--s1); font-size: 0.6875rem; color: var(--fg-faint); }
+.stack-legend span { display: inline-flex; align-items: center; gap: 4px; }
+.stack-legend i { width: 8px; height: 8px; border-radius: 2px; }
+
+/* ── rank medal ──────────────────────────────────────────────────────────── */
+.rank {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; border-radius: 50%;
+  font-size: 0.75rem; font-weight: 700;
+  background: var(--muted); color: var(--fg-dim);
+  font-variant-numeric: tabular-nums;
+}
+.rank.first { background: var(--accent-dim); color: #04220f; }
+
+/* ── session detail drawer ───────────────────────────────────────────────── */
+.drawer-backdrop {
+  position: fixed; inset: 0;
+  /* 50% scrim: strong enough to isolate the drawer (skill: scrim legibility) */
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 90;
+  animation: fadeIn 180ms var(--ease);
+}
+.drawer-backdrop[hidden] { display: none; }
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+.drawer {
+  position: fixed;
+  top: 0; right: 0; bottom: 0;
+  width: min(560px, 100vw);
+  background: var(--surface);
+  border-left: 1px solid var(--border-strong);
+  z-index: 95;
+  overflow-y: auto;
+  padding: var(--s4);
+  padding-top: max(var(--s4), env(safe-area-inset-top));
+  padding-bottom: max(var(--s5), env(safe-area-inset-bottom));
+  /* Slides in from its own edge for spatial continuity (skill: modal-motion) */
+  animation: slideIn 220ms var(--ease);
+}
+.drawer[hidden] { display: none; }
+@keyframes slideIn { from { transform: translateX(24px); opacity: 0; } to { transform: none; opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .drawer, .drawer-backdrop { animation: none; }
+}
+
+.drawer header {
+  display: flex; align-items: center; gap: var(--s3);
+  margin-bottom: var(--s4);
+  padding-bottom: var(--s3);
+  border-bottom: 1px solid var(--border);
+  position: sticky; top: 0;
+  background: var(--surface);
+}
+.drawer header h3 { margin: 0; font-size: 1rem; flex: 1; }
+
+.dl-grid {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--s2) var(--s4);
+  margin: 0 0 var(--s4);
+  font-size: 0.8125rem;
+}
+.dl-grid dt { color: var(--fg-faint); }
+.dl-grid dd { margin: 0; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+.drawer h4 {
+  margin: var(--s4) 0 var(--s2);
+  font-size: 0.6875rem; font-weight: 600;
+  letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--fg-faint);
+}
+
+/* clickable table rows */
+tr.clickable { cursor: pointer; }
+tr.clickable:focus-visible { outline: 2px solid var(--info); outline-offset: -2px; }
+
+/* ══ APPEARANCE PANEL ══════════════════════════════════════════════════════
+   A popover, not a modal: this is a preference surface, so it must not steal
+   the page or break the back button (skill: modal-vs-navigation). Escape and
+   an outside click both dismiss it, and focus returns to the trigger.
+   ═════════════════════════════════════════════════════════════════════════ */
+
+.panel-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: calc(var(--z-panel) - 1);
+  background: transparent;
+  border: 0;
+  padding: 0;
+  cursor: default;
+}
+.panel-backdrop[hidden] { display: none; }
+
+.panel {
+  position: fixed;
+  z-index: var(--z-panel);
+  top: calc(env(safe-area-inset-top) + 56px);
+  right: var(--s3);
+  width: min(340px, calc(100vw - 24px));
+  max-height: min(70dvh, 560px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r3);
+  box-shadow: var(--shadow-2);
+  padding: var(--s4);
+  /* Scales from the trigger corner for spatial continuity (skill: modal-motion) */
+  transform-origin: top right;
+  animation: panelIn var(--dur) var(--ease-out);
+}
+.panel[hidden] { display: none; }
+@keyframes panelIn {
+  from { opacity: 0; transform: scale(0.96) translateY(-6px); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* On a phone it becomes a bottom sheet: a 340px popover pinned to the top-right
+   of a 375px screen is unreachable with one thumb. */
+@media (max-width: 560px) {
+  .panel {
+    top: auto;
+    right: 0;
+    left: 0;
+    bottom: 0;
+    width: 100%;
+    max-height: 82dvh;
+    border-radius: var(--r3) var(--r3) 0 0;
+    border-left: 0;
+    border-right: 0;
+    border-bottom: 0;
+    padding-bottom: max(var(--s5), env(safe-area-inset-bottom));
+    transform-origin: bottom center;
+    animation: sheetIn var(--dur) var(--ease-out);
+  }
+  @keyframes sheetIn {
+    from { opacity: 0; transform: translateY(14px); }
+    to   { opacity: 1; transform: none; }
+  }
+}
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin-bottom: var(--s3);
+}
+.panel-head h2 {
+  margin: 0;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  flex: 1;
+}
+.panel-close {
+  min-width: 36px;
+  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--r1);
+  color: var(--fg-dim);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+.panel-close:hover { background: var(--surface-2); color: var(--fg); }
+.panel-close svg { width: 16px; height: 16px; }
+
+/* Each setting is a fieldset+legend so a screen reader announces the group
+   name before the options (skill: field-grouping). */
+.setting {
+  border: 0;
+  padding: 0;
+  margin: 0 0 var(--s4);
+  min-width: 0;
+}
+.setting > legend {
+  padding: 0;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+  margin-bottom: var(--s2);
+}
+.setting .note {
+  font-size: 0.75rem;
+  color: var(--fg-faint);
+  margin-top: var(--s2);
+  line-height: 1.45;
+}
+
+/* Segmented control. Radios under the hood, so arrow keys move between options
+   and only one is tabbable — that is native radio behaviour and it is better
+   than anything a div could fake. */
+.seg {
+  display: flex;
+  gap: var(--s1);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--r2);
+  padding: 3px;
+}
+.seg.wrap { flex-wrap: wrap; }
+.seg input {
+  position: absolute;
+  width: 1px; height: 1px;
+  opacity: 0;
+  margin: 0;
+  pointer-events: none;
+}
+.seg label {
+  flex: 1 1 0;
+  min-height: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: var(--s1) var(--s2);
+  border-radius: calc(var(--r2) - 3px);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: var(--fg-dim);
+  cursor: pointer;
+  white-space: nowrap;
+  text-align: center;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+.seg label:hover { color: var(--fg); background: var(--surface-2); }
+.seg input:checked + label {
+  background: var(--surface-2);
+  color: var(--fg);
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+}
+/* Selection is marked by a dot as well as by colour and weight. */
+.seg input:checked + label::before {
+  content: "";
+  width: 5px; height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex: none;
+}
+.seg input:focus-visible + label {
+  outline: 2px solid var(--info);
+  outline-offset: 2px;
+}
+
+/* Accent swatches. Each carries its name as accessible text, so the choice is
+   never communicated by colour alone. */
+.swatches { display: flex; gap: var(--s2); flex-wrap: wrap; }
+.swatches input {
+  position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none;
+}
+.swatches label {
+  width: 44px; height: 44px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  border: 2px solid transparent;
+  transition: transform var(--dur-fast) var(--ease-spring), border-color var(--dur-fast) var(--ease);
+  touch-action: manipulation;
+}
+.swatches label i {
+  width: 22px; height: 22px;
+  border-radius: 50%;
+  display: block;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14);
+}
+.swatches label:active { transform: scale(0.92); }
+.swatches input:checked + label { border-color: var(--fg-dim); }
+.swatches input:checked + label i {
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14), 0 0 0 3px var(--surface);
+}
+.swatches input:focus-visible + label { outline: 2px solid var(--info); outline-offset: 2px; }
+
+/* ══ CHART TOOLBAR ═════════════════════════════════════════════════════════ */
+
+.chart-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  flex-wrap: wrap;
+  margin-bottom: var(--s3);
+}
+.chart-toolbar .grow { flex: 1 1 auto; }
+
+/* Range chips. Horizontally scrollable rather than wrapping, so the row height
+   never changes and the chart below cannot shift (CLS). */
+.chips {
+  display: flex;
+  gap: var(--s1);
+  overflow-x: auto;
+  scrollbar-width: none;
+  padding: 2px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--r2);
+  max-width: 100%;
+}
+.chips::-webkit-scrollbar { display: none; }
+.chips button {
+  min-height: 34px;
+  padding: 0 var(--s3);
+  border: 0;
+  border-radius: calc(var(--r2) - 2px);
+  background: transparent;
+  color: var(--fg-dim);
+  font: inherit;
+  font-size: 0.75rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+  touch-action: manipulation;
+}
+.chips button:hover { color: var(--fg); background: var(--surface-2); }
+.chips button[aria-pressed="true"] {
+  background: var(--surface-2);
+  color: var(--fg);
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+}
+
+/* Resolution note next to the range chips: says which rollup is being drawn, so
+   a flat daily line is not mistaken for missing data. */
+.res-note {
+  font-size: 0.6875rem;
+  color: var(--fg-faint);
+  font-family: var(--mono);
+  white-space: nowrap;
+}
+
+/* ══ 21st.dev-CLASS EFFECTS ════════════════════════════════════════════════
+   All four are CSS-only, GPU-friendly (transform/opacity/background-position
+   only), and gated on --motion-scale so `calm`/`off`/reduced-motion get a
+   static equivalent rather than a broken one.
+   ═════════════════════════════════════════════════════════════════════════ */
+
+/* 1. Border beam — a light travelling the edge of a live card. Marks "work is
+      happening here" without a spinner. Implemented as a conic gradient on a
+      ::before behind a masked inner surface, so nothing animates layout. */
+.beam { position: relative; isolation: isolate; }
+.beam::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  padding: 1px;
+  background: conic-gradient(
+    from var(--beam-angle, 0deg),
+    transparent 0deg,
+    var(--accent) 22deg,
+    transparent 60deg
+  );
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  animation: beamSpin calc(3.4s * var(--motion-scale)) linear infinite;
+  z-index: -1;
+  opacity: 0.9;
+}
+@property --beam-angle {
+  syntax: '<angle>';
+  initial-value: 0deg;
+  inherits: false;
+}
+@keyframes beamSpin { to { --beam-angle: 360deg; } }
+/* Fallback for engines without @property: the gradient cannot animate, so show
+   a static accent hairline instead of a dead grey one. */
+@supports not (background: conic-gradient(from 0deg, red, blue)) {
+  .beam::before { background: var(--accent); opacity: 0.5; animation: none; }
+}
+/* Static accent ring when motion is disabled — the state stays visible. */
+html[data-motion="calm"] .beam::before,
+html[data-motion="off"] .beam::before { animation: none; background: var(--accent); opacity: 0.45; }
+
+/* 2. Shimmer skeleton — for content that is loading. A moving highlight reads as
+      "working" where a static grey block reads as "broken". */
+.skel {
+  border-radius: var(--r1);
+  background: linear-gradient(
+    90deg,
+    var(--muted) 0%,
+    var(--surface-2) 40%,
+    var(--muted) 80%
+  );
+  background-size: 220% 100%;
+  animation: shimmer calc(1.4s * var(--motion-scale)) var(--ease) infinite;
+  color: transparent !important;
+  user-select: none;
+}
+@keyframes shimmer {
+  from { background-position: 120% 0; }
+  to   { background-position: -120% 0; }
+}
+html[data-motion="off"] .skel { animation: none; }
+
+/* 3. Spotlight — a soft radial that tracks the pointer across a card. Pure
+      decoration, so it is `full`-motion only and never on touch (no pointer to
+      track, and it would cost a repaint per scroll frame). */
+.card.spot { position: relative; overflow: hidden; }
+.card.spot::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity var(--dur) var(--ease);
+  background: radial-gradient(
+    240px circle at var(--mx, 50%) var(--my, 0%),
+    hsl(var(--accent-h) var(--accent-s) 60% / 0.09),
+    transparent 70%
+  );
+}
+@media (hover: hover) and (pointer: fine) {
+  html[data-motion="full"] .card.spot:hover::after { opacity: 1; }
+}
+
+/* 4. Blur-fade stagger — rows/tiles resolve in sequence on first paint. Delay is
+      set inline as --i so it works for any list length. Capped at 10 steps so a
+      40-row table never takes 2s to appear. */
+html[data-motion="full"] .fade-in {
+  animation: blurFade var(--dur-slow) var(--ease-out) both;
+  animation-delay: calc(min(var(--i, 0), 10) * 28ms);
+}
+@keyframes blurFade {
+  from { opacity: 0; transform: translateY(6px); filter: blur(3px); }
+  to   { opacity: 1; transform: none; filter: none; }
+}
+
+/* Number ticker: the digits are swapped by JS, this only softens the change so
+   a value that jumped is noticeable without being distracting. */
+.tick { transition: color var(--dur) var(--ease); }
+.tick.up   { color: var(--accent); }
+.tick.down { color: var(--info); }
+
+/* Ambient wash behind the header — one static gradient, no animation. */
+header.top { background-image: radial-gradient(120% 340% at 12% -60%, var(--glow), transparent 60%); }
+
+/* ══ LIVE / STALE INDICATION ═══════════════════════════════════════════════ */
+
+/* Freshness pill: how long since the last push. Live data that has silently
+   stopped arriving is the single most misleading state a dashboard can show, so
+   staleness is stated explicitly rather than implied by a still-green dot. */
+.fresh {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.6875rem;
+  font-family: var(--mono);
+  color: var(--fg-faint);
+  font-variant-numeric: tabular-nums;
+}
+.fresh[data-stale="1"] { color: var(--warn); }
+.fresh .bar {
+  width: 26px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--muted);
+  overflow: hidden;
+}
+.fresh .bar i {
+  display: block;
+  height: 100%;
+  width: var(--w, 100%);
+  background: var(--accent);
+  transition: width var(--dur) linear;
+}
+
+/* ── Settings page ───────────────────────────────────────────────────────── */
+
+.card-h {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+  margin-bottom: var(--s3);
+}
+.card-h strong {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--fg);
+}
+.sp-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--s2) var(--s3);
+}
+.sp-grid > label,
+.sp-lab {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 0.75rem;
+  color: var(--fg-dim);
+}
+.sp-in {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r1, 6px);
+  color: var(--fg);
+  padding: 6px 8px;
+  font-size: 0.8125rem;
+  font-family: inherit;
+  min-width: 0;
+}
+.sp-in:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+.sp-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.8125rem;
+  color: var(--fg-dim);
+  cursor: pointer;
+}
+.sp-hosts {
+  margin-top: var(--s3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+.sp-host {
+  display: flex;
+  gap: var(--s2);
+  align-items: center;
+  flex-wrap: wrap;
+}
+.sp-host .sp-hostname { flex: 2; min-width: 140px; }
+.sp-host .sp-hostnote { flex: 1; min-width: 100px; }
+.sp-models {
+  margin-top: var(--s3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+.sp-models > label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 0.75rem;
+  color: var(--fg-dim);
+}
+.fresh[data-stale="1"] .bar i { background: var(--warn); }

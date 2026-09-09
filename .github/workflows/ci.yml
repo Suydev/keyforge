@@ -1,0 +1,131 @@
+name: CI
+
+# No workflows existed before this one, so this is the baseline rather than a
+# refactor. It is shaped around three facts about this repo:
+#
+#   1. The release profile is deliberately expensive — `lto = true`,
+#      `codegen-units = 1`, `opt-level = "z"` — because the binary runs on a
+#      battery-powered tablet. Building it is minutes, not seconds, so it is
+#      never on the routine path.
+#   2. All 141 tests are pure logic: no network, no mocks, no fixtures. They give
+#      the same answer in debug, where they build several times faster.
+#   3. The only real cross-platform risk is conditional compilation — `link.rs`
+#      is `cfg`-gated to Android and must still compile on Linux, macOS and
+#      Windows. That is a compile question, so it needs a build, not a test run.
+
+on:
+  push:
+    branches: [main]
+    # Documentation cannot break a Rust build. Note for later: if a branch
+    # protection rule ever marks `check` as required, a docs-only PR will sit
+    # forever waiting for a job that was skipped. Move this to job-level gating
+    # with a skip-reporting job at that point.
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.gitignore'
+  pull_request:
+    # `labeled`/`unlabeled` are here on purpose: the `cross` job below can be
+    # opted into with a label, and without these events adding the label would
+    # not re-evaluate anything.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.gitignore'
+  workflow_dispatch:
+
+# Cancel superseded PR runs — pushing three times to a branch should not pay for
+# three full runs. Pushes to main are left alone so the history of what actually
+# built stays complete.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # Incremental artifacts are worthless to a fresh runner and inflate the cache
+  # that has to be uploaded and downloaded every run.
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: short
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: fmt + clippy + test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # 68 crates in the lockfile. Without this they are all rebuilt every run.
+      # The action keys on Cargo.lock plus the toolchain version, so a dependency
+      # bump invalidates it and nothing else does.
+      - uses: Swatinem/rust-cache@v2
+
+      # Formatting first: it fails in seconds and needs no compilation, so a
+      # trivial style miss does not burn a full build to be discovered.
+      - name: cargo fmt
+        run: cargo fmt --all --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      # Debug profile, deliberately. See the note at the top of this file.
+      - name: cargo test
+        run: cargo test --locked
+
+  shell:
+    name: shellcheck install.sh
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      # install.sh is the first thing a new user executes, and it is piped
+      # straight into a shell. A POSIX-compliance bug there is worse than a
+      # compile error, so it is checked on every change to it.
+      - name: shellcheck
+        run: shellcheck --shell=sh --severity=warning install.sh
+
+  cross:
+    name: build (${{ matrix.os }})
+    # macOS runners bill at 10x and Windows at 2x. Paying that on every routine
+    # PR to re-prove a compile that has not changed is the single largest waste
+    # available in a repo this size, so the cross-platform matrix is gated:
+    # it runs on main, on tags, on demand, and on any PR labelled `ci:cross`.
+    #
+    # This does not hide release validation — release.yml builds every platform
+    # on a tag, and main is covered on every merge.
+    if: >-
+      github.event_name == 'push' ||
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.pull_request.labels.*.name, 'ci:cross')
+    strategy:
+      # One platform failing should still report the others; otherwise a Windows
+      # break hides a simultaneous macOS break and costs another round trip.
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Separate cache per OS. Sharing one key across platforms produces
+          # constant misses and uploads that are never read.
+          key: ${{ matrix.os }}
+      # `--all-targets` so test code is type-checked too. `check` rather than
+      # `build`: the question here is "does it compile under this platform's cfg
+      # gates", and codegen adds minutes without answering it.
+      - name: cargo check
+        run: cargo check --all-targets --locked
