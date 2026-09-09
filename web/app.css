@@ -1334,4 +1334,13 @@ header.top { background-image: radial-gradient(120% 340% at 12% -60%, var(--glow
   font-size: 0.75rem;
   color: var(--fg-dim);
 }
+.sp-models-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s1);
+  margin-top: var(--s2);
+}
+.sp-models-list .badge {
+  font-size: 0.75rem;
+}
 .fresh[data-stale="1"] .bar i { background: var(--warn); }

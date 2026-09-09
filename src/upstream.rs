@@ -489,11 +489,11 @@ pub async fn probe_capabilities(host: &str, key: &str) -> (bool, bool) {
         ("/v1/chat/completions", ApiFlavor::OpenAi),
         ("/v1/messages", ApiFlavor::Anthropic),
     ] {
+        // Minimal probe body — model name is a placeholder, we only care if the
+        // endpoint answers (not 404/401/403). A real request carries the actual model.
         let body = match flavor {
-            ApiFlavor::Anthropic => {
-                br#"{"model":"claude-sonnet-4-20250514","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}"#.to_vec()
-            }
-            _ => br#"{"model":"gpt-4o-mini","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}"#.to_vec(),
+            ApiFlavor::Anthropic => br#"{"model":"x","max_tokens":1,"messages":[{"role":"user","content":"x"}]}"#.to_vec(),
+            _ => br#"{"model":"x","max_tokens":1,"messages":[{"role":"user","content":"x"}]}"#.to_vec(),
         };
         let ok = match send(
             &host,

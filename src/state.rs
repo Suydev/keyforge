@@ -2410,11 +2410,14 @@ mod tests {
     fn provider_without_the_model_is_dropped_when_someone_has_it() {
         let app = app_all_providers();
         app.note_latency("tabi", 200); // fastest, but lacks the model
-        app.note_latency("gorouter", 2500);
-        app.note_latency("justwoker", 2600);
-        app.set_models_seen("tabi", vec!["claude-opus-4-8".into()]);
-        app.set_models_seen("gorouter", vec!["claude-opus-5".into()]);
-        app.set_models_seen("justwoker", vec!["claude-opus-4-8".into()]);
+        // Set models_seen for ALL providers dynamically
+        for p in &*app.providers.read().unwrap() {
+            if p.id == "gorouter" {
+                app.set_models_seen(&p.id, vec!["claude-opus-5".into()]);
+            } else {
+                app.set_models_seen(&p.id, vec!["claude-opus-4-8".into()]);
+            }
+        }
 
         let order = app.provider_order_for(None, "claude-opus-5");
         assert_eq!(order, vec!["gorouter".to_string()], "order was {order:?}");
@@ -2425,11 +2428,12 @@ mod tests {
         // If nobody advertises the model, lists are stale — keep the old
         // penalty behaviour and try everyone rather than returning empty.
         let app = app_all_providers();
-        app.set_models_seen("tabi", vec!["a".into()]);
-        app.set_models_seen("gorouter", vec!["b".into()]);
-        app.set_models_seen("justwoker", vec!["c".into()]);
+        let n = app.providers.read().unwrap().len();
+        for p in &*app.providers.read().unwrap() {
+            app.set_models_seen(&p.id, vec!["a".into()]);
+        }
         let order = app.provider_order_for(None, "brand-new-model");
-        assert_eq!(order.len(), 3, "order was {order:?}");
+        assert_eq!(order.len(), n, "order was {order:?}");
     }
 
     #[test]
@@ -2452,16 +2456,17 @@ mod tests {
         // failed 1M request justwoker (0 funded, $0) did that 12 times. It is now
         // excluded outright, as long as somebody funded is left to serve.
         let app = app_all_providers();
-        app.note_latency("tabi", 100);
-        app.note_latency("gorouter", 3000);
-        app.note_latency("justwoker", 4000);
-        // Drain tabi's only key.
-        let tabi_key = app.pool("tabi")[0].clone();
-        app.mark_dead(&tabi_key, 3600, "quota");
+        // Drain all providers' keys except the last one (which stays funded).
+        let ids: Vec<String> = app.providers.read().unwrap().iter().map(|p| p.id.to_string()).collect();
+        for id in &ids[..ids.len()-1] {
+            for k in app.pool(id) {
+                app.mark_dead(&k, 3600, "quota");
+            }
+        }
         let order = app.provider_order(None);
-        assert_eq!(order.first().unwrap(), "gorouter", "order was {order:?}");
+        assert_eq!(order.first().unwrap(), ids.last().unwrap(), "order was {order:?}");
         assert!(
-            !order.contains(&"tabi".to_string()),
+            !order.contains(&ids[0]),
             "a provably dry provider must not cost a rung, order was {order:?}"
         );
     }
@@ -2472,13 +2477,14 @@ mod tests {
         // router has to reach its normal "no funded key" reporting path instead
         // of the misleading "no providers configured" terminal error.
         let app = app_all_providers();
-        for p in ["tabi", "gorouter", "justwoker"] {
-            for k in app.pool(p) {
+        let n = app.providers.read().unwrap().len();
+        for p in &*app.providers.read().unwrap() {
+            for k in app.pool(&p.id) {
                 app.mark_dead(&k, 3600, "quota");
             }
         }
         let order = app.provider_order(None);
-        assert_eq!(order.len(), 3, "order was {order:?}");
+        assert_eq!(order.len(), n, "order was {order:?}");
     }
 
     #[test]

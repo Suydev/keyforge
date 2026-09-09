@@ -1319,6 +1319,41 @@ function renderModels(s) {
       }
     },
   );
+
+  // Advertised-but-unused: models each provider claims to serve that have no
+  // traffic yet. Kept in sync with the fast model sync.
+  const adv = $('#advertised');
+  if (adv) {
+    const rows = (s.advertised || []).slice().sort((a, b) => a.id.localeCompare(b.id));
+    adv.innerHTML = '';
+    if (rows.length === 0) {
+      adv.innerHTML = '<div class="empty">No models discovered yet — the fast model sync probes every few seconds.</div>';
+    } else {
+      rows.forEach((m) => {
+        const badge = el('span', 'badge ' + (m.provider || ''), m.id);
+        adv.appendChild(badge);
+        adv.appendChild(document.createTextNode(' '));
+      });
+    }
+  }
+
+  // Per-provider models: what each provider claims to serve
+  const mbp = $('#modelsByProvider');
+  if (mbp) {
+    mpb.innerHTML = '';
+    const providers = (s.providers || []).slice().sort((a, b) => a.id.localeCompare(b.id));
+    if (providers.length === 0) {
+      mpb.innerHTML = '<div class="empty">No providers configured.</div>';
+    } else {
+      providers.forEach((p) => {
+        const card = el('div', 'card');
+        const models = (p.models || []).slice().sort();
+        card.innerHTML = `<div class="card-h"><strong>${esc(p.label || p.id)}</strong> <span class="hint">(${p.id})</span></div>
+          <div class="sp-models-list">${models.length ? models.map((m) => `<span class="badge mono">${esc(m)}</span>`).join(' ') : '<span class="note">No models discovered yet — auto-probing...</span>'}</div>`;
+        mpb.appendChild(card);
+      });
+    }
+  }
 }
 
 function initModelSort() {
