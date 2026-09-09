@@ -919,9 +919,9 @@ impl App {
                 };
 
                 // No funded keys is the worst outcome: nothing can be served.
-                let hold = self.provider(&id).map(|p| p.hold).unwrap_or(0.8);
+                let hold = self.provider(id).map(|p| p.hold).unwrap_or(0.8);
                 let has_funded = self
-                    .pool(&id)
+                    .pool(id)
                     .iter()
                     .any(|k| g.keys.get(k).map(|s| s.usable(now, hold)).unwrap_or(false));
                 let dry_pen = if has_funded { 0.0 } else { 1000.0 };
@@ -1730,7 +1730,7 @@ impl App {
         self.inflight
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(id.clone(), rec);
+            .insert(id, rec);
         self.touch();
         id
     }

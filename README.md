@@ -112,12 +112,11 @@ path if you would rather not pipe a script into a shell.
 You need Rust (the installer offers to fetch it) and one API key from a
 `new-api`-compatible provider.
 
+Start the gateway:
+
 ```sh
-tabi start      # start in the background
-tabi status     # health, per-provider summary, spend
-tabi log        # follow the log
-tabi restart    # after a rebuild
-tabi stop
+./keyforge           # run in foreground
+./keyforge &         # run in background
 ```
 
 Point a client at it:
@@ -132,7 +131,7 @@ curl http://127.0.0.1:8787/v1/chat/completions \
   -d '{"model":"claude-opus-5","messages":[{"role":"user","content":"hi"}]}'
 ```
 
-Force a specific provider by prefixing the path: `/tabi/v1/messages`,
+Force a specific provider by prefixing the path: `/<provider-id>/v1/messages`,
 `/gorouter/v1/chat/completions`.
 
 ---
@@ -195,7 +194,7 @@ its own — exposing it would be handing out the pool.
 
 ```sh
 cargo build --release     # ~4 min on a tablet, seconds on a laptop
-cargo test --release      # 141 tests
+cargo test --release      # 169 tests
 cargo clippy --all-targets
 ```
 

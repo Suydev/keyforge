@@ -351,7 +351,7 @@ fn rewrite_model(body: &Bytes, map: &std::collections::HashMap<String, String>) 
     if map.is_empty() {
         return body.clone();
     }
-    let Ok(mut v) = serde_json::from_slice::<serde_json::Value>(&body) else {
+    let Ok(mut v) = serde_json::from_slice::<serde_json::Value>(body) else {
         return body.clone();
     };
     let Some(obj) = v.as_object_mut() else {
@@ -369,7 +369,7 @@ fn rewrite_model(body: &Bytes, map: &std::collections::HashMap<String, String>) 
 
 pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Body> {
     let (parts, body) = req.into_parts();
-    let route = parse_route(parts.uri.path(), &*app.providers.read().unwrap());
+    let route = parse_route(parts.uri.path(), &app.providers.read().unwrap());
 
     // Buffer the request body once. Every retry replays these exact bytes, so a
     // retry can never send a partial or empty body.
@@ -480,7 +480,7 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
         ApiFlavor::Passthrough => "",
     };
     app.note_session_identity(
-        &fp,
+        fp,
         ident.via,
         ident.compacted,
         &ident.hashes,
@@ -504,7 +504,7 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
         .and_then(|v| v.to_str().ok())
         .filter(|v| {
             let len = v.len();
-            len >= 1 && len <= 20
+            (1..=20).contains(&len)
         })
         .map(|v| v.to_string());
     // Training metadata for this request. Per-attempt fields (ttfb, budget,
@@ -527,11 +527,11 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
     // Register as in flight so the dashboard can show which sessions are
     // actively working right now, not merely "seen recently".
     let flight = app.inflight_begin(
-        &fp,
+        fp,
         if label.is_empty() {
             &client_label
         } else {
-            &label
+            label
         },
         &model,
         client_id,
@@ -606,7 +606,7 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
                         let pool = app.pool(p.id);
                         if let Some(k) = pool.first() {
                             if let upstream::Attempt::Ok(_) =
-                                upstream::probe_models(&host, k).await
+                                upstream::probe_models(host, k).await
                             {
                                 app.set_offline(false);
                                 break;
@@ -617,7 +617,7 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
             }
         }
 
-        let session = app.session(&fp);
+        let session = app.session(fp);
         let preferred = route
             .pinned
             .clone()
@@ -699,7 +699,7 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
                             // under-estimate on long conversations and hand out a
                             // key that then 403s.
                             let hold = app.hold_for(provider_id, &model);
-                            let cands = app.candidates_with_hold(provider_id, &fp, &tried, hold);
+                            let cands = app.candidates_with_hold(provider_id, fp, &tried, hold);
                             let Some(k) = pick_verified(&app, &provider, cands, hold).await else {
                                 errors.push(format!("{provider_id}: no funded key available"));
                                 transient = true;
@@ -808,7 +808,7 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
                                     0,
                                     &message,
                                     "held-for-network",
-                                    &fp,
+                                    fp,
                                     round,
                                     latency_ms,
                                     None,
@@ -838,7 +838,7 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
                                     0,
                                     &message,
                                     "next-key (breaker untouched)",
-                                    &fp,
+                                    fp,
                                     round,
                                     latency_ms,
                                     None,
@@ -869,7 +869,7 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
                                     0,
                                     &message,
                                     "failed-over",
-                                    &fp,
+                                    fp,
                                     round,
                                     latency_ms,
                                     None,
@@ -877,8 +877,8 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
                                     &meta,
                                 );
                                 app.record_request(
-                                    &fp,
-                                    &label,
+                                    fp,
+                                    label,
                                     provider_id,
                                     &key,
                                     &model,
@@ -925,8 +925,8 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
                         // Cannot read usage without consuming the stream, so
                         // record the turn now and let the sweep reconcile spend.
                         app.record_request(
-                            &fp,
-                            &label,
+                            fp,
+                            label,
                             provider_id,
                             &key,
                             &model,
@@ -957,8 +957,8 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
                     };
                     let (cost, in_tok, out_tok) = parse_usage(&collected);
                     app.record_request(
-                        &fp,
-                        &label,
+                        fp,
+                        label,
                         provider_id,
                         &key,
                         &model,
@@ -993,8 +993,8 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
                 let brief: String = brief.chars().take(150).collect();
 
                 app.record_request(
-                    &fp,
-                    &label,
+                    fp,
+                    label,
                     provider_id,
                     &key,
                     &model,
@@ -1029,7 +1029,7 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
                             head.status,
                             &text,
                             "rotated-key",
-                            &fp,
+                            fp,
                             round,
                             head.latency_ms,
                             c.remaining,
@@ -1053,7 +1053,7 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
                             head.status,
                             &text,
                             "retired-key",
-                            &fp,
+                            fp,
                             round,
                             head.latency_ms,
                             None,
@@ -1078,7 +1078,7 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
                             head.status,
                             &text,
                             &format!("cooled-down {ttl}s"),
-                            &fp,
+                            fp,
                             round,
                             head.latency_ms,
                             None,
@@ -1110,7 +1110,7 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
                             head.status,
                             &text,
                             "next-key (breaker untouched)",
-                            &fp,
+                            fp,
                             round,
                             head.latency_ms,
                             None,
@@ -1141,7 +1141,7 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
                             head.status,
                             &text,
                             "failed-over (key preserved)",
-                            &fp,
+                            fp,
                             round,
                             head.latency_ms,
                             None,
@@ -1172,7 +1172,7 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
                             head.status,
                             &text,
                             "provider cooled (keys untouched)",
-                            &fp,
+                            fp,
                             round,
                             head.latency_ms,
                             None,
@@ -1203,7 +1203,7 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
                             head.status,
                             &text,
                             "failed-over",
-                            &fp,
+                            fp,
                             round,
                             head.latency_ms,
                             None,

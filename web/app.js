@@ -2079,16 +2079,19 @@ function initSettingsPage() {
 
   $('#addProviderBtn')?.addEventListener('click', () => {
     if (!settingsDraft) return;
+    const id = 'provider-' + Date.now().toString(36);
     settingsDraft.providers.push({
-      id: 'new-provider',
+      id,
       label: 'New provider',
-      hosts: [{ host: '', enabled: true, note: '' }],
-      keys_file: '',
+      hosts: [{ host: '', enabled: true, note: 'primary' }],
+      keys_file: 'git_gorouter_tabitoken/' + id + '-keys.txt',
       hold: 0.10,
       initial_guess: 50.0,
       enabled: false,
       bias: 0,
       note: '',
+      models: [],
+      model_map: {},
     });
     renderSettings();
   });

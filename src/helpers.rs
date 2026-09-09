@@ -380,7 +380,7 @@ pub fn spawn_net_watchdog(app: Arc<App>) {
                 let prov = app.providers.read().unwrap().first().cloned();
                 if let Some(p) = prov {
                     if let Some(k) = app.pool(p.id).first() {
-                        if let upstream::Attempt::Ok(_) = upstream::probe_models(&p.host, k).await {
+                        if let upstream::Attempt::Ok(_) = upstream::probe_models(p.host, k).await {
                             fail_streak = 0;
                             app.set_offline(false);
                         }
@@ -394,7 +394,7 @@ pub fn spawn_net_watchdog(app: Arc<App>) {
                 let prov = app.providers.read().unwrap().first().cloned();
                 let ok = if let Some(p) = prov {
                     if let Some(k) = app.pool(p.id).first() {
-                        matches!(upstream::probe_models(&p.host, k).await, upstream::Attempt::Ok(_))
+                        matches!(upstream::probe_models(p.host, k).await, upstream::Attempt::Ok(_))
                     } else {
                         true
                     }
