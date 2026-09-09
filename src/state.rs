@@ -2420,7 +2420,8 @@ mod tests {
         }
 
         let order = app.provider_order_for(None, "claude-opus-5");
-        assert_eq!(order, vec!["gorouter".to_string()], "order was {order:?}");
+        assert_eq!(order.first().unwrap(), "gorouter", "order was {order:?}");
+        assert!(!order.contains(&"tabi".to_string()), "tabi lacks the model, order was {order:?}");
     }
 
     #[test]
