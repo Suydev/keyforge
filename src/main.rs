@@ -565,17 +565,25 @@ async fn main() {
     {
         let a = app.clone();
         tokio::spawn(async move {
-            let mut term = match tokio::signal::unix::signal(
-                tokio::signal::unix::SignalKind::terminate(),
-            ) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("tabi-gateway: cannot install SIGTERM handler: {e}");
-                    return;
-                }
+            #[cfg(unix)]
+            let shutdown = async {
+                let mut term = match tokio::signal::unix::signal(
+                    tokio::signal::unix::SignalKind::terminate(),
+                ) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("tabi-gateway: cannot install SIGTERM handler: {e}");
+                        return;
+                    }
+                };
+                term.recv().await;
             };
-            term.recv().await;
-            eprintln!("tabi-gateway: SIGTERM — saving state and exiting");
+            #[cfg(not(unix))]
+            let shutdown = async {
+                let _ = tokio::signal::ctrl_c().await;
+            };
+            shutdown.await;
+            eprintln!("tabi-gateway: shutdown signal — saving state and exiting");
             a.dirty.store(true, std::sync::atomic::Ordering::Relaxed);
             a.save();
             App::release_lock();

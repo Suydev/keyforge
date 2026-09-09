@@ -48,6 +48,7 @@
 //! head budgets and (b) a hint that retry cadence should ease off.
 
 use crate::config;
+#[cfg(unix)]
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
