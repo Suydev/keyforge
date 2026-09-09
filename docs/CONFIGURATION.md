@@ -157,8 +157,8 @@ cooled down rather than dropped, so a transient blip does not permanently shrink
 the pool. If every proxy is cooling, traffic goes **direct** — degraded egress
 beats a failed request.
 
-Override the path with `TABI_PROXIES`, or disable the pool entirely with
-`TABI_NO_PROXY=1`.
+Override the path with `KEYFORGE_PROXIES`, or disable the pool entirely with
+`KEYFORGE_NO_PROXY=1`.
 
 ---
 
@@ -170,14 +170,14 @@ Every one of these has a default. Set them only to change something.
 
 | variable | default | meaning |
 | --- | --- | --- |
-| `TABI_PORT` | `8787` | listen port. Always binds `127.0.0.1` — never a public interface |
-| `TABI_STATE` | `~/.config/tabi/gateway-state.json` | alternate state file, for running a second instance |
-| `TABI_PROXIES` | `~/proxies.txt` | proxy list location |
-| `TABI_NO_PROXY` | unset | `1` disables the pool; all traffic goes direct |
+| `KEYFORGE_PORT` | `8787` | listen port. Always binds `127.0.0.1` — never a public interface |
+| `KEYFORGE_STATE` | `~/.config/tabi/gateway-state.json` | alternate state file, for running a second instance |
+| `KEYFORGE_PROXIES` | `~/proxies.txt` | proxy list location |
+| `KEYFORGE_NO_PROXY` | unset | `1` disables the pool; all traffic goes direct |
 
 A PID lockfile beside the state file prevents two instances from sharing one
-file. If you want a test instance, give it its own `TABI_STATE` **and** its own
-`TABI_PORT`.
+file. If you want a test instance, give it its own `KEYFORGE_STATE` **and** its own
+`KEYFORGE_PORT`.
 
 ### Streaming head budget
 
@@ -192,20 +192,20 @@ budget = clamp( ewma_ttfb × MULT + (SECS_PER_MB × req_MB + OVERHEAD) × SAFETY
 
 | variable | default | meaning |
 | --- | --- | --- |
-| `TABI_HEAD_MULT` | `3.0` | multiplier on the provider's measured TTFB |
-| `TABI_HEAD_MIN_SECS` | `45` | floor, so a fast provider fails over fast |
-| `TABI_HEAD_MAX_SECS` | `170` | ceiling. Near Cloudflare's edge timeout; beyond it you are waiting on nothing |
-| `TABI_HEAD_DEFAULT_SECS` | `120` | base term for a provider with no measurements yet |
-| `TABI_HEAD_SECS_PER_MB` | `35.2` | measured seconds of prefill + upload per MB of body |
-| `TABI_HEAD_OVERHEAD_SECS` | `15.0` | the gateway's own buffer-and-forward cost |
-| `TABI_HEAD_SIZE_SAFETY` | `1.35` | safety factor on the size term |
+| `KEYFORGE_HEAD_MULT` | `3.0` | multiplier on the provider's measured TTFB |
+| `KEYFORGE_HEAD_MIN_SECS` | `45` | floor, so a fast provider fails over fast |
+| `KEYFORGE_HEAD_MAX_SECS` | `170` | ceiling. Near Cloudflare's edge timeout; beyond it you are waiting on nothing |
+| `KEYFORGE_HEAD_DEFAULT_SECS` | `120` | base term for a provider with no measurements yet |
+| `KEYFORGE_HEAD_SECS_PER_MB` | `35.2` | measured seconds of prefill + upload per MB of body |
+| `KEYFORGE_HEAD_OVERHEAD_SECS` | `15.0` | the gateway's own buffer-and-forward cost |
+| `KEYFORGE_HEAD_SIZE_SAFETY` | `1.35` | safety factor on the size term |
 
 ### Cooldowns and polling
 
 | variable | default | meaning |
 | --- | --- | --- |
-| `TABI_NO_CHANNEL_COOLDOWN_SECS` | `45` | how long to skip a provider that reported "no available channel" |
-| `TABI_LINK_POLL_SECS` | `60` | Wi-Fi sampling interval (Android only) |
+| `KEYFORGE_NO_CHANNEL_COOLDOWN_SECS` | `45` | how long to skip a provider that reported "no available channel" |
+| `KEYFORGE_LINK_POLL_SECS` | `60` | Wi-Fi sampling interval (Android only) |
 
 ---
 

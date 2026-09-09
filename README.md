@@ -1,4 +1,4 @@
-# Tabi Gateway
+# KeyForge
 
 A local HTTP gateway that makes an unreliable pool of upstream API keys look like
 one reliable endpoint.
@@ -102,7 +102,7 @@ tab is hidden.
 ## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Suydev/tabi-gateway/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Suydev/keyforge/main/install.sh | sh
 ```
 
 Or clone and run `./install.sh`. Windows: `install.ps1`. See

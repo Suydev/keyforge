@@ -18,7 +18,7 @@ use std::path::PathBuf;
 /// One upstream host. A provider may have several: the first is primary, the
 /// rest are backups tried in order.
 ///
-/// Verified for tabitoken: `tabitoken.com` and `tabitoken.cc` serve identical
+/// Verified for keyforge-token: `keyforge-token.com` and `keyforge-token.cc` serve identical
 /// models AND report identical `total_usage` (12640) for the same key — so they
 /// are one deployment behind two names, sharing one wallet. Modelling them as one
 /// provider avoids double-counting the same balance.
@@ -206,21 +206,21 @@ impl Default for Settings {
             providers: vec![
                 ProviderCfg {
                     id: "tabi".into(),
-                    label: "TabiToken".into(),
+                    label: "KeyForge Token".into(),
                     hosts: vec![
                         HostCfg {
-                            host: "tabitoken.com".into(),
+                            host: "keyforge-token.com".into(),
                             enabled: true,
                             note: "primary".into(),
                         },
                         // Verified same models AND same total_usage => same wallet.
                         HostCfg {
-                            host: "tabitoken.cc".into(),
+                            host: "keyforge-token.cc".into(),
                             enabled: true,
                             note: "backup".into(),
                         },
                     ],
-                    keys_file: "git_gorouter_tabitoken/tabitoken-keys.txt".into(),
+                    keys_file: "git_gorouter_keyforge-token/keyforge-token-keys.txt".into(),
                     hold: 0.80,
                     initial_guess: 120.0,
                     enabled: true,
@@ -237,7 +237,7 @@ impl Default for Settings {
                         enabled: true,
                         note: "primary".into(),
                     }],
-                    keys_file: "git_gorouter_tabitoken/gorouter-keys.txt".into(),
+                    keys_file: "git_gorouter_keyforge-token/gorouter-keys.txt".into(),
                     hold: 0.30,
                     initial_guess: 50.0,
                     enabled: true,
@@ -254,7 +254,7 @@ impl Default for Settings {
                         enabled: true,
                         note: "primary".into(),
                     }],
-                    keys_file: "git_gorouter_tabitoken/justwoker-keys.txt".into(),
+                    keys_file: "git_gorouter_keyforge-token/justwoker-keys.txt".into(),
                     hold: 0.10,
                     initial_guess: 70.0,
                     enabled: true,
@@ -270,7 +270,7 @@ impl Default for Settings {
 
 impl Settings {
     pub fn path() -> PathBuf {
-        if let Ok(p) = std::env::var("TABI_PROVIDERS") {
+        if let Ok(p) = std::env::var("KEYFORGE_PROVIDERS") {
             if !p.is_empty() {
                 return PathBuf::from(p);
             }
@@ -364,10 +364,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn defaults_include_the_verified_tabi_backup() {
+    fn defaults_include_the_verified_keyforge_backup() {
         let s = Settings::default();
         let hosts = s.hosts("tabi");
-        assert_eq!(hosts, vec!["tabitoken.com", "tabitoken.cc"]);
+        assert_eq!(hosts, vec!["keyforge-token.com", "keyforge-token.cc"]);
     }
 
     #[test]
@@ -375,7 +375,7 @@ mod tests {
         let mut s = Settings::default();
         let p = s.providers.iter_mut().find(|p| p.id == "tabi").unwrap();
         p.hosts[1].enabled = false;
-        assert_eq!(s.hosts("tabi"), vec!["tabitoken.com"]);
+        assert_eq!(s.hosts("tabi"), vec!["keyforge-token.com"]);
         assert_eq!(
             s.provider("tabi").unwrap().hosts.len(),
             2,

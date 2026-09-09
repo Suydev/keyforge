@@ -273,7 +273,7 @@ pub async fn vet_proxy(
         Err(e) => return Err(e),
     };
 
-    let timeout = Duration::from_secs(config::PROXY_VET_TIMEOUT_SECS);
+    let timeout = Duration::from_secs(config::proxy_vet_timeout_secs());
     match tokio::time::timeout(timeout, client.request(req)).await {
         Ok(Ok(resp)) => {
             let status = resp.status().as_u16();
@@ -286,7 +286,7 @@ pub async fn vet_proxy(
             }
         }
         Ok(Err(e)) => Err(flatten_err(e)),
-        Err(_) => Err(format!("timeout after {}s", config::PROXY_VET_TIMEOUT_SECS)),
+        Err(_) => Err(format!("timeout after {}s", config::proxy_vet_timeout_secs())),
     }
 }
 
@@ -472,7 +472,7 @@ pub async fn probe_models(host: &str, key: &str) -> Attempt {
         Bytes::new(),
         key,
         ApiFlavor::Passthrough,
-        Duration::from_secs(config::PROBE_TIMEOUT_SECS),
+        Duration::from_secs(config::probe_timeout_secs()),
     )
     .await
 }
@@ -503,7 +503,7 @@ pub async fn probe_capabilities(host: &str, key: &str) -> (bool, bool) {
             Bytes::from(body),
             &key,
             flavor,
-            Duration::from_secs(config::PROBE_TIMEOUT_SECS),
+            Duration::from_secs(config::probe_timeout_secs()),
         )
         .await
         {
@@ -533,7 +533,7 @@ pub async fn probe_usage(host: &str, key: &str) -> Attempt {
         Bytes::new(),
         key,
         ApiFlavor::Passthrough,
-        Duration::from_secs(config::PROBE_TIMEOUT_SECS),
+        Duration::from_secs(config::probe_timeout_secs()),
     )
     .await
 }

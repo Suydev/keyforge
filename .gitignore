@@ -33,7 +33,7 @@ proxy-state.json
 
 # ── Logs and scratch ─────────────────────────────────────────────────────────
 *.log
-tabi-gateway.log
+keyforge.log
 /tmp/
 *.tmp
 *.bin

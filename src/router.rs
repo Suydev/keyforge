@@ -247,7 +247,7 @@ fn terminal_error(msg: &str, detail: Vec<String>) -> Response<Body> {
         "type": "error",
         "message": msg,
         "error": {
-            "type": "tabi_gateway_error",
+            "type": "keyforge_error",
             "code": "gateway_exhausted",
             "message": msg,
             "param": serde_json::Value::Null,
@@ -385,7 +385,7 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<usize>().ok())
     {
-        if cl > config::MAX_BODY_BYTES {
+        if cl > config::max_body_bytes() {
             app.record_error(crate::state::ErrorRecord {
                 t: config::now_secs(),
                 class: "CLIENT".into(),
@@ -396,7 +396,7 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
                 status: 413,
                 message: format!(
                     "request body {cl} bytes exceeds {max} byte cap",
-                    max = config::MAX_BODY_BYTES
+                    max = config::max_body_bytes()
                 ),
                 action: "rejected-before-send".into(),
                 session: String::new(),
@@ -409,7 +409,7 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
             return terminal_error(
                 &format!(
                     "request body too large ({cl} bytes, cap is {} bytes)",
-                    config::MAX_BODY_BYTES
+                    config::max_body_bytes()
                 ),
                 vec![],
             );
@@ -521,7 +521,7 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
     // Wall-clock deadline for the whole request, retries included. Without this
     // the ladder could run ~2.5h while the client timed out at 600s, so the user
     // saw a hang instead of an error.
-    let deadline = std::time::Instant::now() + Duration::from_secs(config::REQUEST_DEADLINE_SECS);
+    let deadline = std::time::Instant::now() + Duration::from_secs(config::request_deadline_secs());
     app.note_client_request();
 
     // Register as in flight so the dashboard can show which sessions are
@@ -571,17 +571,17 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
                 "error",
                 format!(
                     "request gave up after {}s ({round} rounds)",
-                    config::REQUEST_DEADLINE_SECS
+                    config::request_deadline_secs()
                 ),
             );
             app.note_client_outcome(first_provider.as_deref().unwrap_or(""), false, false);
             return terminal_error(
                 &format!(
-                    "tabi-gateway: gave up after {}s. Every provider was failing or every key was \
+                    "keyforge: gave up after {}s. Every provider was failing or every key was \
                      out of funds. This is returned deliberately before your client's own timeout \
                      so you get a readable error instead of a hang. Open http://127.0.0.1:{}/ for \
                      live status.",
-                    config::REQUEST_DEADLINE_SECS,
+                    config::request_deadline_secs(),
                     config::port()
                 ),
                 tail,
@@ -595,14 +595,14 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
         if app.is_offline() {
             app.note_offline_hold();
             let mut waited = 0u64;
-            while app.is_offline() && waited < 900 {
+            while app.is_offline() && waited < 30 {
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 waited += 2;
                 // Cheap liveness check: a free models probe on any provider.
-                if waited.is_multiple_of(10) {
+                if waited.is_multiple_of(6) {
                     let prov = app.providers.read().unwrap().first().cloned();
                     if let Some(p) = prov {
-                        let host = p.host.to_string();
+                        let host = p.host;
                         let pool = app.pool(p.id);
                         if let Some(k) = pool.first() {
                             if let upstream::Attempt::Ok(_) =
@@ -627,7 +627,7 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
         let order = app.provider_order_for(preferred.as_deref(), &model);
         if order.is_empty() {
             return terminal_error(
-                "tabi-gateway: no providers configured (key files empty or unreadable)",
+                "keyforge: no providers configured (key files empty or unreadable)",
                 errors,
             );
         }
@@ -668,7 +668,7 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
             if first_provider.is_none() {
                 first_provider = Some(provider_id.clone());
             }
-            for _ in 0..config::MAX_KEY_ATTEMPTS {
+            for _ in 0..config::max_key_attempts() {
                 let key = match sticky.take() {
                     Some(k) => k,
                     None => {
@@ -742,7 +742,7 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
                 let head_budget = if streaming {
                     Duration::from_secs(app.head_budget_secs(provider_id, body_bytes.len() as u64))
                 } else {
-                    Duration::from_secs(config::UPSTREAM_TIMEOUT_SECS)
+                    Duration::from_secs(config::upstream_timeout_secs())
                 };
                 // Never wait past the request deadline. If what is left cannot
                 // fit a viable attempt, do NOT start one: a 5s budget on a body
@@ -1017,7 +1017,7 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
                         if let Some(req) = c.required {
                             app.learn_hold(provider_id, &model, req);
                         }
-                        app.mark_dead(&key, config::COOLDOWN_QUOTA_SECS, c.detail.clone());
+                        app.mark_dead(&key, config::cooldown_quota_secs(), c.detail.clone());
                         app.note_key_rotation(provider_id);
                         log_error(
                             &app,
@@ -1041,7 +1041,7 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
                     }
                     ErrClass::Auth => {
                         needed_save = true;
-                        app.mark_dead(&key, config::COOLDOWN_AUTH_SECS, "invalid key");
+                        app.mark_dead(&key, config::cooldown_auth_secs(), "invalid key");
                         app.note_key_rotation(provider_id);
                         log_error(
                             &app,
@@ -1066,7 +1066,7 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
                     ErrClass::Rate => {
                         // Healthy key, just busy. Cooldown only.
                         needed_save = true;
-                        let ttl = c.retry_after.unwrap_or(config::COOLDOWN_RATE_SECS);
+                        let ttl = c.retry_after.unwrap_or(config::cooldown_rate_secs());
                         app.mark_dead(&key, ttl, "rate limited");
                         log_error(
                             &app,
@@ -1249,7 +1249,7 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
             app.note_client_outcome(first_provider.as_deref().unwrap_or(""), false, false);
             return terminal_error(
                 &format!(
-                    "tabi-gateway: exhausted {round} retry rounds across {} providers. \
+                    "keyforge: exhausted {round} retry rounds across {} providers. \
                      Every key was out of funds or every upstream refused. \
                      Open http://127.0.0.1:{}/ for live status.",
                     order.len(),
@@ -1322,7 +1322,7 @@ async fn pick_verified(
             let k = g.keys.get(key)?;
             (k.usage_cents, k.last_probe)
         };
-        let stale = usage.is_none() || now.saturating_sub(last_probe) > config::USAGE_STALE_SECS;
+        let stale = usage.is_none() || now.saturating_sub(last_probe) > config::usage_stale_secs();
 
         if !stale {
             return Some(key.clone());
@@ -1348,7 +1348,7 @@ async fn pick_verified(
                 return Some(key.clone());
             }
             upstream::Attempt::Ok(r) if r.status == 401 => {
-                app.mark_dead(key, config::COOLDOWN_AUTH_SECS, "probe: invalid key");
+                app.mark_dead(key, config::cooldown_auth_secs(), "probe: invalid key");
                 continue;
             }
             // Probe inconclusive (WAF, 5xx, timeout). Do not punish the key —

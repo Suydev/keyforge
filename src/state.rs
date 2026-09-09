@@ -587,11 +587,13 @@ impl App {
             let text = std::fs::read_to_string(&path).unwrap_or_default();
             let mut seen = std::collections::HashSet::new();
             let mut keys = Vec::new();
+            let prefix = crate::config::key_prefix();
+            let min_len = crate::config::key_min_len();
             for line in text.lines() {
                 let k = line.trim();
-                // Ignore comments/blank lines; require the sk- prefix so a
+                // Ignore comments/blank lines; require the key prefix so a
                 // stray README line can never become a "key".
-                if k.starts_with("sk-") && k.len() >= 20 && seen.insert(k.to_string()) {
+                if k.starts_with(&prefix) && k.len() >= min_len && seen.insert(k.to_string()) {
                     keys.push(k.to_string());
                 }
             }
@@ -692,7 +694,7 @@ impl App {
             if fp == except_fp {
                 continue;
             }
-            if now.saturating_sub(s.last_seen) < config::SESSION_ACTIVE_SECS {
+            if now.saturating_sub(s.last_seen) < config::session_active_secs() {
                 out.insert(s.key.clone());
             }
         }
@@ -737,7 +739,7 @@ impl App {
                     }
                     if require_margin {
                         if let Some(b) = st.balance {
-                            if b < hold * config::HOLD_SAFETY_FACTOR {
+                            if b < hold * config::hold_safety_factor() {
                                 return None;
                             }
                         }
@@ -1972,7 +1974,7 @@ impl App {
             if let Ok(old) = text.trim().parse::<i32>() {
                 if old != std::process::id() as i32 && pid_alive(old) {
                     return Err(format!(
-                        "another tabi-gateway (pid {old}) is already using {}",
+                        "another keyforge (pid {old}) is already using {}",
                         path.display()
                     ));
                 }
@@ -2125,8 +2127,9 @@ pub fn mask_key(k: &str) -> String {
     // Char-based, not byte-based: byte slicing panics on a multi-byte boundary,
     // and with `panic = "abort"` that takes the whole gateway down.
     let n = k.chars().count();
+    let prefix = crate::config::key_prefix();
     if n < 14 {
-        return "sk-…".into();
+        return format!("{}…", prefix);
     }
     let head: String = k.chars().take(10).collect();
     let tail: String = k.chars().skip(n - 4).collect();

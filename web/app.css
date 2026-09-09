@@ -1,6 +1,6 @@
-/* Tabi Gateway dashboard — design tokens + layout
+/* KeyForge dashboard — design tokens + layout
  *
- * Style: dark technical console (matches the new-api / tabitoken family).
+ * Style: dark technical console (matches the new-api / keyforge-token family).
  * Density 8/10 — this is an operations dashboard, so spacing is 8-32px.
  * Motion 3/10 — 180-260ms, transform/opacity only, and fully disabled under
  * prefers-reduced-motion.

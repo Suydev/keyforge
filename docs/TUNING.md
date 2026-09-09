@@ -82,7 +82,7 @@ It appeared to work only because `SAFETY` was `2.0` and absorbed the error.
 That distinction matters more than it sounds. A correct slope with a modest
 safety factor is not interchangeable with a wrong slope and a large one — the
 second is only correct at the single payload size where the two errors happen to
-cancel. And since `TABI_HEAD_SIZE_SAFETY` exists precisely so it can be tuned,
+cancel. And since `KEYFORGE_HEAD_SIZE_SAFETY` exists precisely so it can be tuned,
 anyone lowering it would have silently under-budgeted every large request.
 
 ### OVERHEAD = 15.0

@@ -35,14 +35,14 @@ run continuously for days. The others build and pass the test suite.
 ## Quick install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Suydev/tabi-gateway/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Suydev/keyforge/main/install.sh | sh
 ```
 
 If you would rather read it first — which is the correct instinct for anything
 piped into a shell:
 
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/Suydev/tabi-gateway/main/install.sh
+curl -fsSLO https://raw.githubusercontent.com/Suydev/keyforge/main/install.sh
 less install.sh
 sh install.sh
 ```
@@ -50,14 +50,14 @@ sh install.sh
 Windows PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/Suydev/tabi-gateway/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/Suydev/keyforge/main/install.ps1 | iex
 ```
 
 ### Installer flags
 
 ```
 --prefix DIR      install root                  (default ~/.local)
---src DIR         where to keep the source      (default ~/tabi-gateway)
+--src DIR         where to keep the source      (default ~/keyforge)
 --port N          listen port                   (default 8787)
 --no-build        install scripts only, skip cargo
 --no-rust         fail instead of offering rustup
@@ -73,7 +73,7 @@ irm https://raw.githubusercontent.com/Suydev/tabi-gateway/main/install.ps1 | iex
    installs it silently.
 3. Copies or clones the source to `--src`.
 4. `cargo build --release`.
-5. Installs the binary to `<prefix>/bin/tabi-gateway`.
+5. Installs the binary to `<prefix>/bin/keyforge`.
 6. Generates the `tabi` launcher **for your platform** — the shebang and paths
    are written at install time rather than shipped hardcoded.
 7. Creates `~/.config/tabi/` and writes a starter `providers.json` if absent.
@@ -87,18 +87,18 @@ open a firewall port.
 ## Manual install
 
 ```sh
-git clone https://github.com/Suydev/tabi-gateway
-cd tabi-gateway
+git clone https://github.com/Suydev/keyforge
+cd keyforge
 cargo build --release
 
 mkdir -p ~/.local/bin ~/.config/tabi
-cp target/release/tabi-gateway ~/.local/bin/
+cp target/release/keyforge ~/.local/bin/
 
 # Keys: one per line, filename must match providers.json
 mkdir -p ~/keys
 printf 'sk-your-key-here\n' > ~/keys/provider-a-keys.txt
 
-~/.local/bin/tabi-gateway            # foreground, Ctrl-C to stop
+~/.local/bin/keyforge            # foreground, Ctrl-C to stop
 ```
 
 Run it in the foreground the first time. Startup prints the key count and total
@@ -188,7 +188,7 @@ Then open `http://127.0.0.1:8787/` for the dashboard.
 ## Upgrading
 
 ```sh
-cd ~/tabi-gateway && git pull && cargo build --release && tabi restart
+cd ~/keyforge && git pull && cargo build --release && tabi restart
 ```
 
 State in `~/.config/tabi/` is forward-compatible; unknown fields are ignored and
@@ -215,8 +215,8 @@ delete them.
 **Build killed partway** — out of memory. `cargo build --release -j1`. On a
 tablet, plug in first; a release build pins every core for minutes.
 
-**`another tabi-gateway is already using ...`** — a PID lockfile is doing its job.
-`tabi stop`, or point `TABI_STATE` at a different file for a second instance.
+**`another keyforge is already using ...`** — a PID lockfile is doing its job.
+`tabi stop`, or point `KEYFORGE_STATE` at a different file for a second instance.
 
 **`port 8787 is held by something that is not the gateway`** — the launcher
 detected a squatter. `tabi restart` replaces it.

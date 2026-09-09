@@ -88,7 +88,7 @@ shapes so either SDK can parse it:
   "error": {
     "type": "api_error",
     "code": "gateway_exhausted",
-    "message": "tabi-gateway: gave up after 480s. Every provider was failing or every key was out of funds.",
+    "message": "keyforge: gave up after 480s. Every provider was failing or every key was out of funds.",
     "detail": [
       "provider-a/sk-4vfx…CaQR: slow (timed out waiting for response head after 45s)",
       "provider-b: no funded key available"

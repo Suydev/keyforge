@@ -2,7 +2,7 @@
 
 Date: 2026-09-06
 Status: Approved in chat (sections 1–5)
-Repo: `~/tabi-gateway` (Rust, not a git repo; token-patch workflows assume the
+Repo: `~/keyforge` (Rust, not a git repo; token-patch workflows assume the
 repo will be git-initialised later this cycle)
 
 ## Goal

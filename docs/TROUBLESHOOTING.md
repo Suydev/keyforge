@@ -53,7 +53,7 @@ key, ever. This is not slowness, it is arithmetic.
 **Fix.** Raise the size term:
 
 ```sh
-TABI_HEAD_SECS_PER_MB=35.2 TABI_HEAD_MAX_SECS=170 tabi restart
+KEYFORGE_HEAD_SECS_PER_MB=35.2 KEYFORGE_HEAD_MAX_SECS=170 tabi restart
 ```
 
 Those are the measured defaults. If your link is slower than the one they were
@@ -112,7 +112,7 @@ curl -s localhost:8787/api/proxies     # pool health, what is cooling
 **Causes of unexpected direct egress:**
 
 - no `~/proxies.txt`, or every line malformed
-- `TABI_NO_PROXY=1` set
+- `KEYFORGE_NO_PROXY=1` set
 - every proxy cooling after failures — direct is the deliberate fallback
 - **connections being reused.** hyper's pool keys by `(scheme, host, port)` and
   does not know which proxy tunnelled a socket, so warm connections are reused
@@ -263,7 +263,7 @@ curl -X POST localhost:8787/api/refresh    # force a free balance sweep
 | --- | --- |
 | `linker cc not found` | no C compiler. `pkg install clang` / `apt install build-essential` / `xcode-select --install` |
 | build killed partway | out of memory. `cargo build --release -j1`. On a tablet, plug in first — release builds pin every core for minutes |
-| `another tabi-gateway is already using ...` | the PID lockfile doing its job. `tabi stop`, or use a separate `TABI_STATE` for a second instance |
+| `another keyforge is already using ...` | the PID lockfile doing its job. `tabi stop`, or use a separate `KEYFORGE_STATE` for a second instance |
 | `port 8787 is held by something that is not the gateway` | a squatter. `tabi restart` replaces it |
 | clippy fails on a fresh clone | Rust version skew — some lints are version-dependent. Check your `rustc -V` against CI's |
 
@@ -273,14 +273,14 @@ curl -X POST localhost:8787/api/refresh    # force a free balance sweep
 
 ```sh
 {
-  echo "=== version ==="; git -C ~/tabi-gateway rev-parse --short HEAD
+  echo "=== version ==="; git -C ~/keyforge rev-parse --short HEAD
   echo "=== rustc ==="; rustc -V
   echo "=== health ==="; curl -s localhost:8787/api/health
   echo "=== providers ==="; tabi status
   echo "=== errors by class ==="
   curl -s localhost:8787/api/errors | grep -o '"class":"[^"]*"' | sort | uniq -c
   echo "=== recent errors ==="; curl -s localhost:8787/api/errors | head -c 4000
-  echo "=== log tail ==="; tail -n 60 ~/tmp/tabi-gateway.log
+  echo "=== log tail ==="; tail -n 60 ~/tmp/keyforge.log
 } > report.txt
 ```
 

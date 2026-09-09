@@ -1,7 +1,7 @@
 //! Configuration: providers, tunables, paths.
 //!
 //! Everything here is data-driven — no hardcoded keys. Key material lives only
-//! in the key files under `~/git_gorouter_tabitoken/` and is loaded at runtime.
+//! in the key files under `~/git_gorouter_keyforge-token/` and is loaded at runtime.
 
 use std::path::PathBuf;
 
@@ -76,9 +76,9 @@ pub const BIND_ADDR: [u8; 4] = [127, 0, 0, 1]; // loopback only, never network-e
 ///   waiting far beyond that is dead air.
 /// - Unmeasured providers get HEAD_BUDGET_DEFAULT as the first term.
 ///
-/// All seven are overridable at startup via `TABI_HEAD_MULT`,
-/// `TABI_HEAD_MIN_SECS`, `TABI_HEAD_MAX_SECS`, `TABI_HEAD_DEFAULT_SECS`,
-/// `TABI_HEAD_SECS_PER_MB`, `TABI_HEAD_OVERHEAD_SECS`, `TABI_HEAD_SIZE_SAFETY`
+/// All seven are overridable at startup via `KEYFORGE_HEAD_MULT`,
+/// `KEYFORGE_HEAD_MIN_SECS`, `KEYFORGE_HEAD_MAX_SECS`, `KEYFORGE_HEAD_DEFAULT_SECS`,
+/// `KEYFORGE_HEAD_SECS_PER_MB`, `KEYFORGE_HEAD_OVERHEAD_SECS`, `KEYFORGE_HEAD_SIZE_SAFETY`
 /// — no rebuild needed.
 pub const HEAD_BUDGET_MULT: f64 = 3.0;
 pub const HEAD_BUDGET_MIN_SECS: u64 = 45;
@@ -88,14 +88,14 @@ pub const HEAD_BUDGET_SECS_PER_MB: f64 = 35.2;
 pub const HEAD_BUDGET_OVERHEAD_SECS: f64 = 15.0;
 pub const HEAD_BUDGET_SIZE_SAFETY: f64 = 1.35;
 
-fn env_u64(name: &str, dflt: u64) -> u64 {
+pub fn env_u64(name: &str, dflt: u64) -> u64 {
     std::env::var(name)
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(dflt)
 }
 
-fn env_f64(name: &str, dflt: f64) -> f64 {
+pub fn env_f64(name: &str, dflt: f64) -> f64 {
     std::env::var(name)
         .ok()
         .and_then(|v| v.parse().ok())
@@ -105,29 +105,29 @@ fn env_f64(name: &str, dflt: f64) -> f64 {
 /// Multiplier applied to measured TTFB EWMA. 3x absorbs normal variance
 /// without mistaking a slow start for a stuck one.
 pub fn head_mult() -> f64 {
-    env_f64("TABI_HEAD_MULT", HEAD_BUDGET_MULT)
+    env_f64("KEYFORGE_HEAD_MULT", HEAD_BUDGET_MULT)
 }
 
 /// Floor: a fast provider fails over fast instead of hanging to the ceiling.
 pub fn head_min_secs() -> u64 {
-    env_u64("TABI_HEAD_MIN_SECS", HEAD_BUDGET_MIN_SECS)
+    env_u64("KEYFORGE_HEAD_MIN_SECS", HEAD_BUDGET_MIN_SECS)
 }
 
 /// Ceiling: past Cloudflare's edge timeout, waiting is dead air.
 pub fn head_max_secs() -> u64 {
-    env_u64("TABI_HEAD_MAX_SECS", HEAD_BUDGET_MAX_SECS)
+    env_u64("KEYFORGE_HEAD_MAX_SECS", HEAD_BUDGET_MAX_SECS)
 }
 
 /// Budget for a provider with no TTFB samples yet. Generous on purpose —
 /// killing a first-seen provider on a tight budget would punish exploration.
 pub fn head_default_secs() -> u64 {
-    env_u64("TABI_HEAD_DEFAULT_SECS", HEAD_BUDGET_DEFAULT_SECS)
+    env_u64("KEYFORGE_HEAD_DEFAULT_SECS", HEAD_BUDGET_DEFAULT_SECS)
 }
 
 /// Seconds of prefill+upload per MB of request body. Measured on this device
 /// (see the fit above), NOT guessed. Raise it if the device's link degrades.
 pub fn head_secs_per_mb() -> f64 {
-    env_f64("TABI_HEAD_SECS_PER_MB", HEAD_BUDGET_SECS_PER_MB)
+    env_f64("KEYFORGE_HEAD_SECS_PER_MB", HEAD_BUDGET_SECS_PER_MB)
 }
 
 /// The gateway's own overhead: buffer-the-body-then-forward, plus a per-attempt
@@ -136,17 +136,28 @@ pub fn head_secs_per_mb() -> f64 {
 /// speed. Streaming the body through instead of collecting it would largely
 /// remove this, at which point lower the value — do not treat it as fixed.
 pub fn head_overhead_secs() -> f64 {
-    env_f64("TABI_HEAD_OVERHEAD_SECS", HEAD_BUDGET_OVERHEAD_SECS)
+    env_f64("KEYFORGE_HEAD_OVERHEAD_SECS", HEAD_BUDGET_OVERHEAD_SECS)
 }
 
 /// Safety factor on the size term. 1.35x, not 2x: the slope it multiplies is now
 /// measured against three payload sizes including two completed 1M runs, so the
 /// factor covers variance rather than compensating for a wrong slope.
 pub fn head_size_safety() -> f64 {
-    env_f64("TABI_HEAD_SIZE_SAFETY", HEAD_BUDGET_SIZE_SAFETY)
+    env_f64("KEYFORGE_HEAD_SIZE_SAFETY", HEAD_BUDGET_SIZE_SAFETY)
 }
 
-/// How long to skip a provider that reported `no available channel`.
+/// Key validation: prefix and minimum length. A key is only accepted if it
+/// starts with KEY_PREFIX and is at least KEY_MIN_LEN characters long.
+pub const KEY_PREFIX: &str = "sk-";
+pub const KEY_MIN_LEN: usize = 20;
+
+pub fn key_prefix() -> String {
+    std::env::var("KEYFORGE_KEY_PREFIX").unwrap_or_else(|_| KEY_PREFIX.into())
+}
+
+pub fn key_min_len() -> usize {
+    env_u64("KEYFORGE_KEY_MIN_LEN", KEY_MIN_LEN as u64) as usize
+}
 ///
 /// This is a provider-wide outage with a healthy host: new-api answered, the
 /// site was up, the keys and balances were fine, but no backend existed for the
@@ -160,12 +171,16 @@ pub fn head_size_safety() -> f64 {
 pub const NO_CHANNEL_COOLDOWN_SECS: u64 = 45;
 
 pub fn no_channel_cooldown_secs() -> u64 {
-    env_u64("TABI_NO_CHANNEL_COOLDOWN_SECS", NO_CHANNEL_COOLDOWN_SECS)
+    env_u64("KEYFORGE_NO_CHANNEL_COOLDOWN_SECS", NO_CHANNEL_COOLDOWN_SECS)
 }
 
 /// Timeout for a NON-streaming request, where the head only arrives once the
 /// whole answer has been generated — legitimately minutes for a long completion.
 pub const UPSTREAM_TIMEOUT_SECS: u64 = 300;
+
+pub fn upstream_timeout_secs() -> u64 {
+    env_u64("KEYFORGE_UPSTREAM_TIMEOUT_SECS", UPSTREAM_TIMEOUT_SECS)
+}
 
 /// Context/output limits declared for the gateway models in `opencode.jsonc`.
 ///
@@ -189,19 +204,39 @@ pub const OPENCODE_OUTPUT_LIMIT: u64 = 65_535;
 /// user simply saw a hang. Better to return a readable terminal error in time.
 pub const REQUEST_DEADLINE_SECS: u64 = 480;
 
+pub fn request_deadline_secs() -> u64 {
+    env_u64("KEYFORGE_REQUEST_DEADLINE_SECS", REQUEST_DEADLINE_SECS)
+}
+
 /// Cap on a buffered body. Protects against OOM on a memory-constrained tablet
 /// when an upstream (or a local caller) sends something enormous.
 pub const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
 
+pub fn max_body_bytes() -> usize {
+    env_u64("KEYFORGE_MAX_BODY_BYTES", MAX_BODY_BYTES as u64) as usize
+}
+
 /// Free `/v1/models` probe timeout (uptime checks + key verification).
 pub const PROBE_TIMEOUT_SECS: u64 = 12;
+
+pub fn probe_timeout_secs() -> u64 {
+    env_u64("KEYFORGE_PROBE_TIMEOUT_SECS", PROBE_TIMEOUT_SECS)
+}
 
 /// How many keys to try on one upstream before failing over to its sibling.
 pub const MAX_KEY_ATTEMPTS: usize = 6;
 
+pub fn max_key_attempts() -> usize {
+    env_u64("KEYFORGE_MAX_KEY_ATTEMPTS", MAX_KEY_ATTEMPTS as u64) as usize
+}
+
 /// A key must hold at least `hold * this` to be handed to a NEW session, so a
 /// fresh conversation does not start on a key that dies mid-flow.
 pub const HOLD_SAFETY_FACTOR: f64 = 2.5;
+
+pub fn hold_safety_factor() -> f64 {
+    env_f64("KEYFORGE_HOLD_SAFETY_FACTOR", HOLD_SAFETY_FACTOR)
+}
 
 /// Cooldowns. Quota is short because balances get topped up; auth is long
 /// because an invalid token is effectively permanent.
@@ -209,12 +244,32 @@ pub const COOLDOWN_QUOTA_SECS: u64 = 6 * 3600;
 pub const COOLDOWN_AUTH_SECS: u64 = 7 * 86_400;
 pub const COOLDOWN_RATE_SECS: u64 = 60;
 
+pub fn cooldown_quota_secs() -> u64 {
+    env_u64("KEYFORGE_COOLDOWN_QUOTA_SECS", COOLDOWN_QUOTA_SECS)
+}
+
+pub fn cooldown_auth_secs() -> u64 {
+    env_u64("KEYFORGE_COOLDOWN_AUTH_SECS", COOLDOWN_AUTH_SECS)
+}
+
+pub fn cooldown_rate_secs() -> u64 {
+    env_u64("KEYFORGE_COOLDOWN_RATE_SECS", COOLDOWN_RATE_SECS)
+}
+
 /// A session is "active" (and owns its key exclusively) for this long after its
 /// last request. Lets parallel agents get their own keys.
 pub const SESSION_ACTIVE_SECS: u64 = 45 * 60;
 
+pub fn session_active_secs() -> u64 {
+    env_u64("KEYFORGE_SESSION_ACTIVE_SECS", SESSION_ACTIVE_SECS)
+}
+
 /// Balance data older than this is re-probed before the key is handed out.
 pub const USAGE_STALE_SECS: u64 = 20 * 60;
+
+pub fn usage_stale_secs() -> u64 {
+    env_u64("KEYFORGE_USAGE_STALE_SECS", USAGE_STALE_SECS)
+}
 
 // ── Battery budget ───────────────────────────────────────────────────────────
 // Target: <=5%/hour on a OnePlus Pad Go. Everything below is deliberately slow.
@@ -227,15 +282,27 @@ pub const USAGE_STALE_SECS: u64 = 20 * 60;
 /// small TLS request per provider, and connections are pooled).
 pub const UPTIME_PROBE_SECS: u64 = 120;
 
+pub fn uptime_probe_secs() -> u64 {
+    env_u64("KEYFORGE_UPTIME_PROBE_SECS", UPTIME_PROBE_SECS)
+}
+
 /// When a probe fails, retry this soon instead of waiting a full interval — so a
 /// brief blip is not drawn as a two-minute outage.
 pub const UPTIME_RETRY_SECS: u64 = 20;
+
+pub fn uptime_retry_secs() -> u64 {
+    env_u64("KEYFORGE_UPTIME_RETRY_SECS", UPTIME_RETRY_SECS)
+}
 
 /// Consecutive failed probes before a provider is drawn as DOWN.
 ///
 /// Without this, one dropped packet paints a red bar. Two failures ~20s apart is
 /// a real outage; one is noise.
 pub const UPTIME_FAIL_THRESHOLD: u32 = 2;
+
+pub fn uptime_fail_threshold() -> u32 {
+    env_u64("KEYFORGE_UPTIME_FAIL_THRESHOLD", UPTIME_FAIL_THRESHOLD as u64) as u32
+}
 
 /// Wi-Fi link sampling interval (see `link.rs`).
 ///
@@ -246,22 +313,47 @@ pub const UPTIME_FAIL_THRESHOLD: u32 = 2;
 pub const LINK_POLL_SECS: u64 = 60;
 
 pub fn link_poll_secs() -> u64 {
-    env_u64("TABI_LINK_POLL_SECS", LINK_POLL_SECS)
+    env_u64("KEYFORGE_LINK_POLL_SECS", LINK_POLL_SECS)
 }
 
 /// Full key-pool balance sweep interval.
 pub const SWEEP_INTERVAL_SECS: u64 = 30 * 60;
+
+pub fn sweep_interval_secs() -> u64 {
+    env_u64("KEYFORGE_SWEEP_INTERVAL_SECS", SWEEP_INTERVAL_SECS)
+}
+
 /// Keys probed per sweep, and concurrency. Gentle to avoid tripping Cloudflare
 /// and to keep the radio from staying hot.
 pub const SWEEP_BATCH: usize = 120;
 pub const SWEEP_CONCURRENCY: usize = 4;
 pub const SWEEP_PACING_MS: u64 = 120;
 
+pub fn sweep_batch() -> usize {
+    env_u64("KEYFORGE_SWEEP_BATCH", SWEEP_BATCH as u64) as usize
+}
+
+pub fn sweep_concurrency() -> usize {
+    env_u64("KEYFORGE_SWEEP_CONCURRENCY", SWEEP_CONCURRENCY as u64) as usize
+}
+
+pub fn sweep_pacing_ms() -> u64 {
+    env_u64("KEYFORGE_SWEEP_PACING_MS", SWEEP_PACING_MS)
+}
+
 /// GitHub key-sync helper interval (4h, as requested).
 pub const KEYSYNC_INTERVAL_SECS: u64 = 4 * 3600;
 
+pub fn keysync_interval_secs() -> u64 {
+    env_u64("KEYFORGE_KEYSYNC_INTERVAL_SECS", KEYSYNC_INTERVAL_SECS)
+}
+
 /// Snapshot state to disk at most this often (coalesced writes save I/O).
 pub const STATE_FLUSH_SECS: u64 = 20;
+
+pub fn state_flush_secs() -> u64 {
+    env_u64("KEYFORGE_STATE_FLUSH_SECS", STATE_FLUSH_SECS)
+}
 
 /// Rolling history retained for the dashboard charts.
 ///
@@ -343,11 +435,11 @@ impl HistoryRes {
 // falls steadily over a day. So the pool cannot be a static file — it needs a
 // maintainer that vets, evicts and refills on its own.
 
-/// Where the vetted pool lives. Overridable with `TABI_PROXIES`.
+/// Where the vetted pool lives. Overridable with `KEYFORGE_PROXIES`.
 pub fn proxies_path() -> std::path::PathBuf {
-    std::env::var("TABI_PROXIES")
+    std::env::var("KEYFORGE_PROXIES")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| home().join("git_gorouter_tabitoken/proxies.txt"))
+        .unwrap_or_else(|_| home().join("git_gorouter_keyforge-token/proxies.txt"))
 }
 
 /// Candidate list downloaded from ProxyScrape, or dropped in by hand.
@@ -355,7 +447,7 @@ pub fn proxies_path() -> std::path::PathBuf {
 /// Checked in order; the first that exists is used. The Downloads location is
 /// first because that is where a browser download lands.
 pub fn proxy_candidates_paths() -> Vec<std::path::PathBuf> {
-    if let Ok(v) = std::env::var("TABI_PROXY_CANDIDATES") {
+    if let Ok(v) = std::env::var("KEYFORGE_PROXY_CANDIDATES") {
         return vec![std::path::PathBuf::from(v)];
     }
     vec![
@@ -379,17 +471,29 @@ pub const PROXY_MAINT_SECS: u64 = 900;
 /// cost of a cycle. 40 yielded ~20 working endpoints in live testing.
 pub const PROXY_VET_BATCH: usize = 40;
 
+pub fn proxy_vet_batch() -> usize {
+    env_u64("KEYFORGE_PROXY_VET_BATCH", PROXY_VET_BATCH as u64) as usize
+}
+
 /// Concurrent vet attempts. Kept low deliberately: a burst of parallel
 /// connections from one device to one provider is the pattern that draws
 /// Cloudflare's attention, which is the thing proxies exist to avoid.
 pub const PROXY_VET_CONCURRENCY: usize = 6;
 
+pub fn proxy_vet_concurrency() -> usize {
+    env_u64("KEYFORGE_PROXY_VET_CONCURRENCY", PROXY_VET_CONCURRENCY as u64) as usize
+}
+
 /// Per-attempt timeout when vetting. Free proxies are slow; anything past this
 /// is not worth keeping even if it eventually answers.
 pub const PROXY_VET_TIMEOUT_SECS: u64 = 12;
 
+pub fn proxy_vet_timeout_secs() -> u64 {
+    env_u64("KEYFORGE_PROXY_VET_TIMEOUT_SECS", PROXY_VET_TIMEOUT_SECS)
+}
+
 pub fn proxy_maint_secs() -> u64 {
-    env_u64("TABI_PROXY_MAINT_SECS", PROXY_MAINT_SECS)
+    env_u64("KEYFORGE_PROXY_MAINT_SECS", PROXY_MAINT_SECS)
 }
 
 /// Which API surface a request is using. Both are supported for every provider.
@@ -466,10 +570,10 @@ pub fn home() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("/data/data/com.termux/files/home"))
 }
 
-/// State file location. Honours `TABI_STATE` so a test instance can run against
+/// State file location. Honours `KEYFORGE_STATE` so a test instance can run against
 /// a scratch file without touching the live pool.
 pub fn state_path() -> PathBuf {
-    if let Ok(p) = std::env::var("TABI_STATE") {
+    if let Ok(p) = std::env::var("KEYFORGE_STATE") {
         if !p.is_empty() {
             return PathBuf::from(p);
         }
@@ -482,7 +586,7 @@ pub fn keys_path(rel: &str) -> PathBuf {
 }
 
 pub fn port() -> u16 {
-    std::env::var("TABI_PORT")
+    std::env::var("KEYFORGE_PORT")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(DEFAULT_PORT)

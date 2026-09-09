@@ -1,8 +1,8 @@
 [package]
-name = "tabi-gateway"
+name = "keyforge"
 version = "1.0.0"
 edition = "2021"
-description = "Multi-provider AI gateway: key pool rotation, live dashboard, zero-credit uptime probing"
+description = "KeyForge: multi-provider AI gateway with key pool rotation, auto-model-fetch, and a live dashboard"
 
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "io-util", "sync", "fs", "signal", "process"] }

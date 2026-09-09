@@ -1,4 +1,4 @@
-//! Tabi Gateway — multi-provider AI gateway with a live dashboard.
+//! KeyForge — multi-provider AI gateway with a live dashboard.
 //!
 //! # What it does
 //! Owns a pool of ~1700 API keys across providers, and presents them to clients
@@ -11,7 +11,7 @@
 //! POST /v1/messages            Anthropic Messages API (Claude Code)
 //! POST /v1/chat/completions    OpenAI-compatible (OpenCode)
 //! GET  /v1/models              model list
-//!      /tabi/v1/...            force TabiToken
+//!      /tabi/v1/...            force KeyForge Token
 //!      /gorouter/v1/...        force GoRouter
 //!      /auto/v1/...            explicit auto-route (same as bare /v1)
 //!
@@ -102,7 +102,7 @@ fn not_found(path: &str) -> Response<Body> {
     let body = serde_json::json!({
         "error": {
             "type": "not_found",
-            "message": format!("tabi-gateway: no route for {path}"),
+            "message": format!("keyforge: no route for {path}"),
             "hint": "API paths must start with /v1/ (optionally prefixed /tabi/ or /gorouter/). Dashboard is at /",
         }
     });
@@ -474,8 +474,8 @@ async fn main() {
     // Lock the state file BEFORE loading it. Two instances on the same state
     // file silently overwrite each other's key pool.
     if let Err(e) = App::acquire_lock() {
-        eprintln!("tabi-gateway: {e}");
-        eprintln!("  stop the other instance, or set TABI_STATE to a different path.");
+        eprintln!("keyforge: {e}");
+        eprintln!("  stop the other instance, or set KEYFORGE_STATE to a different path.");
         std::process::exit(1);
     }
 
@@ -485,7 +485,7 @@ async fn main() {
     app.save();
 
     // Outbound proxy pool. Enabled by default when proxies.txt has entries;
-    // TABI_NO_PROXY=1 forces direct so a proxy outage can never block work.
+    // KEYFORGE_NO_PROXY=1 forces direct so a proxy outage can never block work.
     let proxy_file = config::proxies_path();
     let mut n_proxies = upstream::proxy_pool().load_file(&proxy_file);
     // Cold start: no vetted file yet, so seed straight from the candidate list.
@@ -496,7 +496,7 @@ async fn main() {
             if let Ok(bytes) = std::fs::read(&path) {
                 let cands = proxy::parse_proxyscrape_json(&bytes);
                 if !cands.is_empty() {
-                    let take = cands.into_iter().take(config::PROXY_VET_BATCH).collect();
+                    let take = cands.into_iter().take(config::proxy_vet_batch()).collect();
                     n_proxies = upstream::proxy_pool().add_endpoints(take);
                     println!("  proxies    seeded {n_proxies} unvetted from {}", path.display());
                     break;
@@ -504,7 +504,7 @@ async fn main() {
             }
         }
     }
-    let want_proxy = std::env::var("TABI_NO_PROXY").ok().as_deref() != Some("1");
+    let want_proxy = std::env::var("KEYFORGE_NO_PROXY").ok().as_deref() != Some("1");
     upstream::proxy_pool().set_enabled(want_proxy && n_proxies > 0);
 
     let port = config::port();
@@ -513,15 +513,15 @@ async fn main() {
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("tabi-gateway: cannot bind {addr}: {e}");
+            eprintln!("keyforge: cannot bind {addr}: {e}");
             eprintln!("  is another gateway or the old node proxy already running?");
-            eprintln!("  try: pkill -f tabi-proxy   (or set TABI_PORT)");
+            eprintln!("  try: pkill -f keyforge-proxy   (or set KEYFORGE_PORT)");
             App::release_lock();
             std::process::exit(1);
         }
     };
 
-    println!("tabi-gateway listening on http://{addr}");
+    println!("keyforge listening on http://{addr}");
     for (id, total, added) in &report {
         let (alive, funds) = app.provider_summary(id);
         println!("  {id:<9} {total:>4} keys  {alive:>4} usable  ${funds:.2} known  (+{added} new)");
@@ -542,7 +542,7 @@ async fn main() {
         let a = app.clone();
         tokio::spawn(async move {
             if tokio::signal::ctrl_c().await.is_ok() {
-                eprintln!("\ntabi-gateway: saving state and exiting");
+                eprintln!("\nkeyforge: saving state and exiting");
                 a.dirty.store(true, std::sync::atomic::Ordering::Relaxed);
                 a.save();
                 App::release_lock();
@@ -572,7 +572,7 @@ async fn main() {
                 ) {
                     Ok(s) => s,
                     Err(e) => {
-                        eprintln!("tabi-gateway: cannot install SIGTERM handler: {e}");
+                        eprintln!("keyforge: cannot install SIGTERM handler: {e}");
                         return;
                     }
                 };
@@ -583,7 +583,7 @@ async fn main() {
                 let _ = tokio::signal::ctrl_c().await;
             };
             shutdown.await;
-            eprintln!("tabi-gateway: shutdown signal — saving state and exiting");
+            eprintln!("keyforge: shutdown signal — saving state and exiting");
             a.dirty.store(true, std::sync::atomic::Ordering::Relaxed);
             a.save();
             App::release_lock();

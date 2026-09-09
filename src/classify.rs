@@ -295,7 +295,7 @@ pub fn classify_http(status: u16, headers_blob: &str, body: &str) -> Classified 
     // an overdrawn account as WAF and keep the key marked healthy forever.
     //
     // The same build ALSO emits an all-English variant with a machine-readable
-    // code, observed live from tabitoken.com:
+    // code, observed live from keyforge-token.com:
     //   {"code":"pre_consume_token_quota_failed","message":"token quota is not
     //    enough, token remain quota: ＄0.780000, need quota: ＄0.800000"}
     // None of the Chinese phrases appear in it, so it used to fall through to the
@@ -451,10 +451,10 @@ pub fn classify_http(status: u16, headers_blob: &str, body: &str) -> Classified 
 mod tests {
     use super::*;
 
-    // The exact production error string observed from tabitoken.com.
+    // The exact production error string observed from keyforge-token.com.
     const REAL_QUOTA: &str = r#"{"error":{"type":"new_api_error","message":"预扣费额度失败, 用户剩余额度: ＄0.495838, 需要预扣费额度: ＄0.800000 (request id: 202608311318293874546308268d9d6HaxTQ02M)"},"type":"error"}"#;
     const REAL_AUTH: &str = r#"{"error":{"code":"","message":"Invalid token (request id: 202608311559191809455718268d9d6FuzhrQfg)","type":"new_api_error"}}"#;
-    // The all-English pre-consume refusal, captured live from tabitoken.com on
+    // The all-English pre-consume refusal, captured live from keyforge-token.com on
     // 2026-09-04 while replaying a 2.7MB request. Same provider, same condition
     // as REAL_QUOTA, entirely different wording plus a machine-readable code.
     const REAL_QUOTA_EN: &str = r#"{"error":{"message":"token quota is not enough, token remain quota: ＄0.780000, need quota: ＄0.800000 (request id: 202609041320379753596318268d9d6qWKnSw7H)","type":"new_api_error","param":"","code":"pre_consume_token_quota_failed"}}"#;
@@ -692,7 +692,7 @@ mod tests {
             "dns error: failed to lookup address information",
             "getaddrinfo ENOTFOUND gorouter.app",
             "Temporary failure in name resolution",
-            "EAI_AGAIN tabitoken.com",
+            "EAI_AGAIN keyforge-token.com",
         ] {
             assert_eq!(classify_transport(msg).class, ErrClass::Offline, "{msg}");
         }

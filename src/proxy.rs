@@ -1,7 +1,7 @@
 //! Outbound proxy support: HTTP CONNECT tunnelling with health-aware rotation.
 //!
 //! # Why
-//! All 1745 keys currently reach tabitoken/gorouter from one device IP. That is
+//! All 1745 keys currently reach keyforge-token/gorouter from one device IP. That is
 //! exactly the pattern Cloudflare answers with an HTML 502/524 interstitial —
 //! observed repeatedly in the error log as `UPSTREAM ... <!DOCTYPE html>`.
 //! Spreading requests over the proxy pool makes the traffic look like many
@@ -14,7 +14,7 @@
 //! for battery.
 //!
 //! Verified live against the real pool: a CONNECT tunnel returns HTTP 200 from
-//! tabitoken and the provider sees the proxy IP, not the device IP.
+//! keyforge-token and the provider sees the proxy IP, not the device IP.
 //!
 //! # Failure policy
 //! A proxy that fails is cooled down, not deleted. If every proxy is cooling,
@@ -32,6 +32,8 @@ use std::task::{Context, Poll};
 use hyper::Uri;
 use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+use crate::config::env_u64;
 use tokio::net::TcpStream;
 
 /// Base64, implemented inline to avoid a dependency for ~20 lines of work.
@@ -299,6 +301,10 @@ fn now_ms() -> u64 {
 /// so a transient blip is retried soon and a dead endpoint is left alone.
 const COOL_SECS: u64 = 90;
 
+pub fn cool_secs() -> u64 {
+    env_u64("KEYFORGE_PROXY_COOL_SECS", COOL_SECS)
+}
+
 /// Consecutive failures before an endpoint is dropped from the pool entirely.
 ///
 /// Free proxies are not like paid ones: they do not usually recover. Keeping a
@@ -308,8 +314,16 @@ const COOL_SECS: u64 = 90;
 /// them is gone.
 const EVICT_AFTER_FAILS: u32 = 3;
 
+pub fn evict_after_fails() -> u32 {
+    env_u64("KEYFORGE_PROXY_EVICT_AFTER_FAILS", EVICT_AFTER_FAILS as u64) as u32
+}
+
 /// Below this many usable endpoints, the pool asks to be refilled.
 const REFILL_BELOW: usize = 8;
+
+pub fn refill_below() -> usize {
+    env_u64("KEYFORGE_PROXY_REFILL_BELOW", REFILL_BELOW as u64) as usize
+}
 
 impl ProxyPool {
     pub fn new() -> Self {
@@ -468,7 +482,7 @@ impl ProxyPool {
             }
             // Past the eviction threshold but not yet swept: skip rather than
             // spend a connect timeout on something already known dead.
-            if st.consecutive_fail >= EVICT_AFTER_FAILS {
+            if st.consecutive_fail >= evict_after_fails() {
                 continue;
             }
             if best
@@ -521,9 +535,9 @@ impl ProxyPool {
         st.consecutive_fail = st.consecutive_fail.saturating_add(1);
         // Back off further each time rather than retrying a corpse every 90s.
         // Free proxies mostly die permanently, so the cooldown grows with the
-        // streak and eviction takes over past EVICT_AFTER_FAILS.
+        // streak and eviction takes over past evict_after_fails().
         let mult = st.consecutive_fail.min(6) as u64;
-        st.cool_until = now() + COOL_SECS * mult;
+        st.cool_until = now() + cool_secs() * mult;
         st.last_error = err.chars().take(160).collect();
     }
 
@@ -540,13 +554,13 @@ impl ProxyPool {
         eps.iter()
             .filter(|e| {
                 h.get(&e.addr())
-                    .map(|s| s.cool_until <= t && s.consecutive_fail < EVICT_AFTER_FAILS)
+                    .map(|s| s.cool_until <= t && s.consecutive_fail < evict_after_fails())
                     .unwrap_or(true)
             })
             .count()
     }
 
-    /// Drop endpoints that have failed `EVICT_AFTER_FAILS` times in a row.
+    /// Drop endpoints that have failed `evict_after_fails()` times in a row.
     ///
     /// Returns the addresses removed, so the caller can log what it lost rather
     /// than silently shrinking the pool.
@@ -558,7 +572,7 @@ impl ProxyPool {
             eps.retain(|e| {
                 let dead = h
                     .get(&e.addr())
-                    .map(|s| s.consecutive_fail >= EVICT_AFTER_FAILS)
+                    .map(|s| s.consecutive_fail >= evict_after_fails())
                     .unwrap_or(false);
                 if dead {
                     removed.push(e.addr());
@@ -597,7 +611,7 @@ impl ProxyPool {
 
     /// Does the pool need refilling?
     pub fn needs_refill(&self) -> bool {
-        self.is_enabled() && self.healthy_count() < REFILL_BELOW
+        self.is_enabled() && self.healthy_count() < refill_below()
     }
 
     /// Persist the current endpoint list, best-first, so a restart keeps the
@@ -618,7 +632,7 @@ impl ProxyPool {
                 })
         });
         let mut out = String::new();
-        out.push_str("# Vetted proxy pool, written by tabi-gateway.\n");
+        out.push_str("# Vetted proxy pool, written by keyforge.\n");
         out.push_str("# Best first: most successes, then lowest connect latency.\n");
         out.push_str("# Regenerated automatically — edits are kept but may be reordered.\n");
         for (e, hst) in &rows {
@@ -886,7 +900,7 @@ mod tests {
     fn three_consecutive_failures_evicts() {
         let p = pool_with(2);
         let victim = p.pick().unwrap().addr();
-        for _ in 0..EVICT_AFTER_FAILS {
+        for _ in 0..evict_after_fails() {
             p.note_fail(&victim, "dead");
         }
         let removed = p.evict_dead();
@@ -912,7 +926,7 @@ mod tests {
     fn evicted_endpoints_are_never_picked_even_before_sweeping() {
         let p = pool_with(2);
         let victim = p.pick().unwrap().addr();
-        for _ in 0..EVICT_AFTER_FAILS {
+        for _ in 0..evict_after_fails() {
             p.note_fail(&victim, "dead");
         }
         // No evict_dead() call: pick must already refuse it.
@@ -939,7 +953,7 @@ mod tests {
         let p = pool_with(4);
         let all: Vec<String> = (0..4).map(|i| format!("10.0.0.{i}:8000")).collect();
         p.note_fail(&all[0], "x"); // cooling
-        for _ in 0..EVICT_AFTER_FAILS {
+        for _ in 0..evict_after_fails() {
             p.note_fail(&all[1], "dead"); // evicted
         }
         assert_eq!(p.healthy_count(), 2, "only the untouched two are usable");
@@ -947,14 +961,14 @@ mod tests {
 
     #[test]
     fn needs_refill_tracks_the_healthy_floor() {
-        // The threshold is strict `<`, so exactly REFILL_BELOW healthy is still
-        // fine and REFILL_BELOW - 1 is not. Pinning the boundary rather than a
+        // The threshold is strict `<`, so exactly refill_below() healthy is still
+        // fine and refill_below() - 1 is not. Pinning the boundary rather than a
         // vague "some failures" keeps an off-by-one from slipping in later.
-        let p = pool_with(REFILL_BELOW);
-        assert_eq!(p.healthy_count(), REFILL_BELOW);
+        let p = pool_with(refill_below());
+        assert_eq!(p.healthy_count(), refill_below());
         assert!(!p.needs_refill(), "exactly at the floor is still enough");
         p.note_fail("10.0.0.0:8000", "x");
-        assert_eq!(p.healthy_count(), REFILL_BELOW - 1);
+        assert_eq!(p.healthy_count(), refill_below() - 1);
         assert!(p.needs_refill(), "one below the floor must request a refill");
         // A disabled pool never asks, or a user who turned proxies off would
         // still see background refetching.
@@ -968,7 +982,7 @@ mod tests {
         p.note_ok("10.0.0.2:8000", 50);
         p.note_ok("10.0.0.2:8000", 50);
         p.note_ok("10.0.0.1:8000", 900);
-        let f = std::env::temp_dir().join(format!("tabi-save-{}.txt", std::process::id()));
+        let f = std::env::temp_dir().join(format!("keyforge-save-{}.txt", std::process::id()));
         let n = p.save_file(&f).unwrap();
         assert_eq!(n, 3);
         let text = std::fs::read_to_string(&f).unwrap();
@@ -1010,7 +1024,7 @@ mod tests {
         // egress silently went direct. An empty parse is almost always an error,
         // so the previous pool is kept and the caller is told.
         let p = pool_with(5);
-        let f = std::env::temp_dir().join(format!("tabi-bad-{}.txt", std::process::id()));
+        let f = std::env::temp_dir().join(format!("keyforge-bad-{}.txt", std::process::id()));
         std::fs::write(&f, "# only comments\n\n   \ngarbage line\n").unwrap();
         let r = p.load_file_detailed(&f);
         assert!(r.kept_existing, "must refuse the file");
@@ -1035,7 +1049,7 @@ mod tests {
         // Cold start with no file yet: loading zero is the honest answer, and the
         // refusal must not fire because there is nothing to protect.
         let p = ProxyPool::new();
-        let f = std::env::temp_dir().join(format!("tabi-empty-{}.txt", std::process::id()));
+        let f = std::env::temp_dir().join(format!("keyforge-empty-{}.txt", std::process::id()));
         std::fs::write(&f, "").unwrap();
         let r = p.load_file_detailed(&f);
         assert!(!r.kept_existing);
@@ -1049,7 +1063,7 @@ mod tests {
         let p = pool_with(3);
         p.note_ok("10.0.0.1:8000", 100);
         p.note_ok("10.0.0.1:8000", 100);
-        let f = std::env::temp_dir().join(format!("tabi-keep-{}.txt", std::process::id()));
+        let f = std::env::temp_dir().join(format!("keyforge-keep-{}.txt", std::process::id()));
         p.save_file(&f).unwrap();
         let r = p.load_file_detailed(&f);
         assert!(!r.kept_existing);
@@ -1067,7 +1081,7 @@ mod tests {
     #[test]
     fn skipped_count_ignores_comments_and_blanks() {
         let p = ProxyPool::new();
-        let f = std::env::temp_dir().join(format!("tabi-skip-{}.txt", std::process::id()));
+        let f = std::env::temp_dir().join(format!("keyforge-skip-{}.txt", std::process::id()));
         std::fs::write(&f, "# header\n\n10.0.0.1:8000\nnonsense\n  # indented\n").unwrap();
         let r = p.load_file_detailed(&f);
         assert_eq!(r.loaded, 1);
@@ -1098,7 +1112,7 @@ mod tests {
         p.note_ok("10.0.0.1:8000", 120);
         p.note_ok("10.0.0.2:8000", 90);
         p.note_fail("10.0.0.3:8000", "some error: with colons: in it");
-        let f = std::env::temp_dir().join(format!("tabi-rt-{}.txt", std::process::id()));
+        let f = std::env::temp_dir().join(format!("keyforge-rt-{}.txt", std::process::id()));
         let saved = p.save_file(&f).unwrap();
 
         let p2 = ProxyPool::new();
@@ -1267,7 +1281,7 @@ mod tests {
     #[test]
     fn loading_a_file_parses_and_registers_health() {
         use std::io::Write;
-        let f = std::env::temp_dir().join(format!("tabi-proxies-{}.txt", std::process::id()));
+        let f = std::env::temp_dir().join(format!("keyforge-proxies-{}.txt", std::process::id()));
         {
             let mut fh = std::fs::File::create(&f).unwrap();
             writeln!(fh, "# comment").unwrap();

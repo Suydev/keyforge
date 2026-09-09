@@ -17,7 +17,7 @@ use std::time::Duration;
 
 /// Provider uptime WITHOUT spending credits.
 ///
-/// `GET /v1/models` is free on every new-api deployment (verified on tabitoken,
+/// `GET /v1/models` is free on every new-api deployment (verified on keyforge-token,
 /// gorouter, justwoker and seekai) and proves two things at once: the &host is
 /// reachable, and the key authenticates. A "hi" completion would prove the same
 /// while burning the pre-deduction hold on every probe.
@@ -111,7 +111,7 @@ pub fn spawn_uptime_prober(app: Arc<App>) {
                             failed += 1;
                             let n = pending_fails.entry(p.id.to_string()).or_insert(0);
                             *n += 1;
-                            if *n >= config::UPTIME_FAIL_THRESHOLD {
+                            if *n >= config::uptime_fail_threshold() {
                                 staged.push((p.id.to_string(), false, r.latency_ms as u32));
                                 app.event(
                                     "error",
@@ -140,7 +140,7 @@ pub fn spawn_uptime_prober(app: Arc<App>) {
                         }
                         let n = pending_fails.entry(p.id.to_string()).or_insert(0);
                         *n += 1;
-                        if *n >= config::UPTIME_FAIL_THRESHOLD {
+                        if *n >= config::uptime_fail_threshold() {
                             staged.push((p.id.to_string(), false, 0));
                             app.event(
                                 "error",
@@ -181,9 +181,9 @@ pub fn spawn_uptime_prober(app: Arc<App>) {
             }
 
             let wait = if retry_soon {
-                config::UPTIME_RETRY_SECS
+                config::uptime_retry_secs()
             } else {
-                config::UPTIME_PROBE_SECS
+                config::uptime_probe_secs()
             };
             tokio::time::sleep(Duration::from_secs(wait)).await;
         }
@@ -213,7 +213,7 @@ pub fn spawn_balance_sweeper(app: Arc<App>) {
                     "[sweep] done — tabi {t_alive} alive ${t_funds:.2} | gorouter {g_alive} alive ${g_funds:.2}"
                 );
             }
-            tokio::time::sleep(Duration::from_secs(config::SWEEP_INTERVAL_SECS)).await;
+            tokio::time::sleep(Duration::from_secs(config::sweep_interval_secs())).await;
         }
     });
 }
@@ -234,7 +234,7 @@ fn collect_stale(app: &Arc<App>) -> Vec<String> {
                 }
                 match k.usage_cents {
                     None => unprobed.push(key),
-                    Some(_) if now.saturating_sub(k.last_probe) > config::USAGE_STALE_SECS => {
+                    Some(_) if now.saturating_sub(k.last_probe) > config::usage_stale_secs() => {
                         stale.push(key)
                     }
                     _ => {}
@@ -243,7 +243,7 @@ fn collect_stale(app: &Arc<App>) -> Vec<String> {
         }
     }
     unprobed.extend(stale);
-    unprobed.truncate(config::SWEEP_BATCH);
+    unprobed.truncate(config::sweep_batch());
     unprobed
 }
 
@@ -255,7 +255,7 @@ async fn sweep_batch(app: &Arc<App>, keys: Vec<String>) {
     let keys = Arc::new(tokio::sync::Mutex::new(keys.into_iter()));
     let mut workers = Vec::new();
 
-    for _ in 0..config::SWEEP_CONCURRENCY {
+    for _ in 0..config::sweep_concurrency() {
         let app = app.clone();
         let keys = keys.clone();
         workers.push(tokio::spawn(async move {
@@ -279,7 +279,7 @@ async fn sweep_batch(app: &Arc<App>, keys: Vec<String>) {
                         }
                     }
                     upstream::Attempt::Ok(r) if r.status == 401 => {
-                        app.mark_dead(&key, config::COOLDOWN_AUTH_SECS, "probe: invalid key");
+                        app.mark_dead(&key, config::cooldown_auth_secs(), "probe: invalid key");
                     }
                     upstream::Attempt::Ok(_) => app.mark_probed(&key),
                     upstream::Attempt::Err { message, .. } => {
@@ -292,7 +292,7 @@ async fn sweep_batch(app: &Arc<App>, keys: Vec<String>) {
                         app.mark_probed(&key);
                     }
                 }
-                tokio::time::sleep(Duration::from_millis(config::SWEEP_PACING_MS)).await;
+                tokio::time::sleep(Duration::from_millis(config::sweep_pacing_ms())).await;
             }
         }));
     }
@@ -332,13 +332,13 @@ pub fn spawn_key_sync(app: Arc<App>) {
                     Err(e) => eprintln!("[keysync] skipped: {e}"),
                 }
             }
-            tokio::time::sleep(Duration::from_secs(config::KEYSYNC_INTERVAL_SECS)).await;
+            tokio::time::sleep(Duration::from_secs(config::keysync_interval_secs())).await;
         }
     });
 }
 
 async fn git_pull() -> Result<bool, String> {
-    let repo = config::home().join("git_gorouter_tabitoken");
+    let repo = config::home().join("git_gorouter_keyforge-token");
     if !repo.join(".git").exists() {
         return Err("not a git repo".into());
     }
@@ -363,7 +363,7 @@ async fn git_pull() -> Result<bool, String> {
 pub fn spawn_state_flusher(app: Arc<App>) {
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(Duration::from_secs(config::STATE_FLUSH_SECS)).await;
+            tokio::time::sleep(Duration::from_secs(config::state_flush_secs())).await;
             app.save();
         }
     });
@@ -373,19 +373,43 @@ pub fn spawn_state_flusher(app: Arc<App>) {
 /// immediately — no fixed timer, no client-visible retry counter.
 pub fn spawn_net_watchdog(app: Arc<App>) {
     tokio::spawn(async move {
+        let mut fail_streak = 0u32;
         loop {
             if app.is_offline() {
+                // Try to come back online: probe any provider's /v1/models.
                 let prov = app.providers.read().unwrap().first().cloned();
                 if let Some(p) = prov {
-                    let host = p.host.to_string();
                     if let Some(k) = app.pool(p.id).first() {
-                        if let upstream::Attempt::Ok(_) = upstream::probe_models(&host, k).await {
+                        if let upstream::Attempt::Ok(_) = upstream::probe_models(&p.host, k).await {
+                            fail_streak = 0;
                             app.set_offline(false);
                         }
                     }
                 }
                 tokio::time::sleep(Duration::from_secs(5)).await;
             } else {
+                // Check liveness less often. A single failure does NOT flip us
+                // offline — WiFi with no internet would otherwise hold every
+                // request forever. Require 3 consecutive failures first.
+                let prov = app.providers.read().unwrap().first().cloned();
+                let ok = if let Some(p) = prov {
+                    if let Some(k) = app.pool(p.id).first() {
+                        matches!(upstream::probe_models(&p.host, k).await, upstream::Attempt::Ok(_))
+                    } else {
+                        true
+                    }
+                } else {
+                    true
+                };
+                if ok {
+                    fail_streak = 0;
+                } else {
+                    fail_streak += 1;
+                    if fail_streak >= 3 {
+                        app.set_offline(true);
+                        fail_streak = 0;
+                    }
+                }
                 tokio::time::sleep(Duration::from_secs(20)).await;
             }
         }
@@ -458,7 +482,7 @@ pub async fn probe_all_unprobed(app: Arc<App>, reason: &str) {
                         }
                     }
                     upstream::Attempt::Ok(r) if r.status == 401 => {
-                        app.mark_dead(&key, config::COOLDOWN_AUTH_SECS, "probe: invalid key");
+                        app.mark_dead(&key, config::cooldown_auth_secs(), "probe: invalid key");
                     }
                     upstream::Attempt::Ok(_) => app.mark_probed(&key),
                     upstream::Attempt::Err { message, .. } => {
@@ -525,7 +549,7 @@ pub fn spawn_proxy_maintainer(app: Arc<App>) {
 /// serves — no hand-editing, no hardcoding.
 pub fn spawn_fast_model_sync(app: Arc<App>) {
     tokio::spawn(async move {
-        let interval = std::env::var("TABI_MODEL_SYNC_SECS")
+        let interval = std::env::var("KEYFORGE_MODEL_SYNC_SECS")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(5);
@@ -671,7 +695,7 @@ async fn refill_proxies(app: &Arc<App>) -> usize {
     let batch: Vec<crate::proxy::ProxyEndpoint> = candidates
         .into_iter()
         .filter(|e| !known.contains(&e.addr()))
-        .take(config::PROXY_VET_BATCH)
+        .take(config::proxy_vet_batch())
         .collect();
     if batch.is_empty() {
         return 0;
@@ -697,7 +721,7 @@ async fn refill_proxies(app: &Arc<App>) -> usize {
     // provider is the pattern proxies exist to avoid.
     let mut good: Vec<crate::proxy::ProxyEndpoint> = Vec::new();
     let mut checked = 0usize;
-    for chunk in batch.chunks(config::PROXY_VET_CONCURRENCY) {
+    for chunk in batch.chunks(config::proxy_vet_concurrency()) {
         let mut set = Vec::new();
         for ep in chunk {
             let ep = ep.clone();
@@ -716,7 +740,7 @@ async fn refill_proxies(app: &Arc<App>) -> usize {
         }
         // Stop as soon as the pool is comfortable again rather than vetting the
         // whole batch for its own sake.
-        if pool.healthy_count() + good.len() >= config::PROXY_VET_BATCH.min(20) {
+        if pool.healthy_count() + good.len() >= config::proxy_vet_batch().min(20) {
             break;
         }
     }
