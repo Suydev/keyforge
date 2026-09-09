@@ -225,13 +225,8 @@ impl Default for Settings {
                     initial_guess: 120.0,
                     enabled: true,
                     bias: 0.0,
-                    note: "flat per-request hold; refundable".into(),
-                    models: vec![
-                        "claude-opus-5".into(),
-                        "claude-opus-5-thinking".into(),
-                        "claude-opus-4-8".into(),
-                        "claude-opus-4-8-thinking".into(),
-                    ],
+                     note: "flat per-request hold; refundable".into(),
+                    models: vec![],
                     model_map: std::collections::HashMap::new(),
                 },
                 ProviderCfg {
@@ -248,10 +243,7 @@ impl Default for Settings {
                     enabled: true,
                     bias: 0.0,
                     note: "".into(),
-                    models: vec![
-                        "claude-opus-5".into(),
-                        "claude-opus-5-thinking".into(),
-                    ],
+                    models: vec![],
                     model_map: std::collections::HashMap::new(),
                 },
                 ProviderCfg {
@@ -268,11 +260,7 @@ impl Default for Settings {
                     enabled: true,
                     bias: 0.0,
                     note: "per-token pricing: measured ~$1/turn on long thinking".into(),
-                    models: vec![
-                        "gpt-5.6-terra".into(),
-                        "gpt-5.6-luna".into(),
-                        "gpt-5.6-sol".into(),
-                    ],
+                     models: vec![],
                     model_map: std::collections::HashMap::new(),
                 },
             ],
