@@ -1725,6 +1725,50 @@ function initKeyForm() {
   }
 }
 
+function initProviderForm() {
+  const form = $('#addProviderForm');
+  if (!form) return;
+  const name = $('#apName');
+  const host = $('#apHost');
+  const keys = $('#apKeys');
+  const btn = $('#apAddBtn');
+  const status = $('#apStatus');
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const label = name.value.trim();
+    const h = host.value.trim();
+    const keyList = keys.value.split('\n').map((s) => s.trim()).filter(Boolean);
+    if (!label) { status.textContent = 'enter a provider name'; name.focus(); return; }
+    if (!h) { status.textContent = 'enter a host or base URL'; host.focus(); return; }
+
+    btn.disabled = true;
+    status.textContent = 'adding…';
+    try {
+      const r = await fetch('/api/providers', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ label, host: h, keys: keyList }),
+      });
+      const d = await r.json();
+      if (!r.ok || d.ok === false) throw new Error(d.error || ('HTTP ' + r.status));
+      status.textContent = `${d.message} — ${d.keysAdded || 0} key${d.keysAdded === 1 ? '' : 's'} added`;
+      toast('ok', d.message);
+      name.value = '';
+      host.value = '';
+      keys.value = '';
+      settingsDraft = null; // next Settings render refetches the server, not the stale copy
+      refreshLeaderboard(true);
+      if (state.page === 'providers' && state.snap) renderProviders(state.snap);
+    } catch (err) {
+      status.textContent = 'failed: ' + err.message;
+      toast('warn', 'Add provider failed: ' + err.message);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+}
+
 
 /* ── errors tab ──────────────────────────────────────────────────────────── */
 
@@ -2083,11 +2127,11 @@ function initSettingsPage() {
     settingsDraft.providers.push({
       id,
       label: 'New provider',
-      hosts: [{ host: '', enabled: true, note: 'primary' }],
-      keys_file: 'git_gorouter_tabitoken/' + id + '-keys.txt',
+      hosts: [{ host: '', enabled: true, note: 'add the host (e.g. api.reseller.com)' }],
+      keys_file: 'keys/' + id + '-keys.txt',
       hold: 0.10,
       initial_guess: 50.0,
-      enabled: false,
+      enabled: true,
       bias: 0,
       note: '',
       models: [],
@@ -2661,6 +2705,7 @@ function boot() {
   initTabs();
   initModelSort();
   initKeyForm();
+  initProviderForm();
   initSound();
   initProxyControls();
   initSettingsPage();

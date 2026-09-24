@@ -416,7 +416,15 @@ pub fn keys_page(app: &Arc<App>, provider: &str, limit: usize) -> Value {
     json!({ "provider": provider, "total": total, "rows": rows })
 }
 
-/// Verify a pasted key against every provider and adopt it if it has funds.
+/// Verify a pasted key against every currently-configured provider and adopt
+/// it if it has funds.
+///
+/// The provider list is read from the LIVE settings (`app.settings`), which is
+/// what the dashboard edits — not the runtime snapshot list, which only
+/// refreshes on the 5s hot-reload and therefore lags a provider added moments
+/// ago. "Freeze the list at startup" is exactly the class of bug the README
+/// warns about, so this never caches: each request re-reads what is configured
+/// right now.
 ///
 /// Uses only FREE endpoints:
 ///   1. `/v1/models`                     — which provider owns this key?
@@ -433,12 +441,35 @@ pub async fn verify_and_add(app: &Arc<App>, key: &str) -> Value {
         return json!({ "ok": false, "error": "key already in the pool", "duplicate": true });
     }
 
+    // Live providers from the settings file / dashboard edits. Only usable
+    // channels: enabled provider with at least one enabled host.
+    let providers: Vec<crate::settings::ProviderCfg> = app
+        .settings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .providers
+        .iter()
+        .filter(|p| p.enabled && p.hosts.iter().any(|h| h.enabled))
+        .cloned()
+        .collect();
+
+    if providers.is_empty() {
+        return json!({
+            "ok": false,
+            "error": "no providers are configured yet — add one from the Providers page first",
+        });
+    }
+
     let mut tried = Vec::new();
 
-    let providers = app.providers.read().unwrap().clone();
     for p in providers {
+        // A provider's primary (first enabled) host is what routing dials.
+        let Some(host) = p.hosts.iter().find(|h| h.enabled).map(|h| h.host.clone()) else {
+            continue;
+        };
+
         // Step 1: does this key authenticate here?
-        let models = match upstream::probe_models(p.host, key).await {
+        let models = match upstream::probe_models(&host, key).await {
             upstream::Attempt::Ok(r) if (200..300).contains(&r.status) => {
                 upstream::parse_model_ids(&r.body)
             }
@@ -453,7 +484,7 @@ pub async fn verify_and_add(app: &Arc<App>, key: &str) -> Value {
         };
 
         // Step 2: measure spend, derive balance.
-        let (usage_cents, balance) = match upstream::probe_usage(p.host, key).await {
+        let (usage_cents, balance) = match upstream::probe_usage(&host, key).await {
             upstream::Attempt::Ok(r) if r.status == 200 => {
                 match upstream::parse_usage_cents(&r.body) {
                     Some(c) => (Some(c), Some((p.initial_guess - c / 100.0).max(0.0))),
@@ -484,7 +515,7 @@ pub async fn verify_and_add(app: &Arc<App>, key: &str) -> Value {
             });
         }
 
-        let added = app.append_key(p.id, key).unwrap_or(false);
+        let added = app.append_key(&p.id, key).unwrap_or(false);
         if added {
             if let Some(c) = usage_cents {
                 app.set_usage(key, c);
@@ -516,9 +547,155 @@ pub async fn verify_and_add(app: &Arc<App>, key: &str) -> Value {
 
     json!({
         "ok": false,
-        "error": "key was not accepted by any configured provider",
+        "error": format!(
+            "key was not accepted by any of the {} enabled provider(s)",
+            tried.len()
+        ),
         "tried": tried,
     })
+}
+
+/// Add a brand-new provider from the dashboard: name + host + optional keys.
+///
+/// Writes the provider into the settings file (which hot-reloads), creates the
+/// provider's key file under `~/keys/` when keys are pasted, and registers
+/// those keys live. The id is derived from the name so `/api/...` can be dipped
+/// into immediately: a provider `myreseller` answers at `myreseller/v1/messages`.
+pub fn add_provider(app: &Arc<App>, label: &str, host: &str, keys: &[String]) -> Value {
+    use crate::settings::{HostCfg, ProviderCfg};
+
+    let label = label.trim().to_string();
+    if label.is_empty() {
+        return json!({ "ok": false, "error": "enter a provider name" });
+    }
+    let host = normalize_host(host);
+    if host.is_empty() {
+        return json!({
+            "ok": false,
+            "error": "enter a host or base URL, e.g. api.reseller.com or https://api.reseller.com/v1",
+        });
+    }
+
+    let mut id = slugify(&label);
+    if id.is_empty() {
+        return json!({ "ok": false, "error": "provider name must contain a letter" });
+    }
+    // Uniquify against what is configured right now: `myreseller`, `myreseller-2`, …
+    {
+        let s = app.settings.lock().unwrap_or_else(|e| e.into_inner());
+        if s.providers.iter().any(|p| p.id == id) {
+            let base = id.clone();
+            let mut n = 2;
+            loop {
+                id = format!("{base}-{n}");
+                if !s.providers.iter().any(|p| p.id == id) {
+                    break;
+                }
+                n += 1;
+            }
+        }
+    }
+
+    let keys_file = format!("keys/{id}-keys.txt");
+    let cfg = ProviderCfg {
+        id: id.clone(),
+        label: label.clone(),
+        hosts: vec![HostCfg {
+            host: host.clone(),
+            enabled: true,
+            note: "added from the dashboard".into(),
+        }],
+        keys_file: keys_file.clone(),
+        hold: 0.10,
+        initial_guess: 50.0,
+        enabled: true,
+        bias: 0.0,
+        note: format!("added from the dashboard at {}", config::now_secs()),
+        models: vec![],
+        model_map: Default::default(),
+    };
+
+    // Persist to the file first so the change survives a crash, then apply the
+    // running process. If the write fails, back the provider right out rather
+    // than leaving memory and disk disagreeing.
+    {
+        let mut s = app.settings.lock().unwrap_or_else(|e| e.into_inner());
+        if s.providers.iter().any(|p| p.id == cfg.id) {
+            return json!({ "ok": false, "error": format!("provider `{}` already exists", cfg.id) });
+        }
+        s.providers.push(cfg.clone());
+        if let Err(e) = s.save() {
+            s.providers.pop();
+            return json!({ "ok": false, "error": format!("could not save settings: {e}") });
+        }
+    }
+    // The hot-reload watcher would pick this up within ~5s anyway, but do it now
+    // so the new endpoint is live the moment the request returns.
+    app.reload_providers();
+
+    let mut added = 0usize;
+    let mut existing = 0usize;
+    for k in keys {
+        let k = k.trim();
+        if k.is_empty() {
+            continue;
+        }
+        if app.append_key(&id, k).unwrap_or(false) {
+            added += 1;
+        } else {
+            existing += 1;
+        }
+    }
+
+    app.event(
+        "info",
+        format!(
+            "provider `{id}` ({label}) added from the dashboard — host {host}, {added} new key{}",
+            if added == 1 { "" } else { "s" }
+        ),
+    );
+
+    json!({
+        "ok": true,
+        "provider": id,
+        "label": label,
+        "host": host,
+        "keys_file": keys_file,
+        "keysAdded": added,
+        "keysExisting": existing,
+        "message": format!(
+            "provider `{id}` added — live at /{id}/v1/messages (host {host})",
+        ),
+    })
+}
+
+/// Reduce a free-text base URL to the bare host the gateway dials over HTTPS:
+/// `https://api.reseller.com/v1` → `api.reseller.com`. A custom port survives.
+fn normalize_host(raw: &str) -> String {
+    let mut h = raw.trim();
+    if let Some(pos) = h.find("://") {
+        h = &h[pos + 3..];
+    }
+    h.split(['/', '?', '#']).next().unwrap_or("").trim().to_string()
+}
+
+/// Make a stable provider id from a free-text label: lowercase, and every run
+/// of non-alphanumerics collapses into one hyphen. "MyReseller!" → "myreseller".
+fn slugify(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut at_hyphen = false;
+    for c in s.to_lowercase().chars() {
+        if c.is_alphanumeric() {
+            if at_hyphen && !out.is_empty() && !out.ends_with('-') {
+                out.push('-');
+            }
+            out.push(c);
+            at_hyphen = false;
+        } else if !at_hyphen {
+            at_hyphen = true;
+        }
+    }
+    out.trim_matches('-').to_string()
 }
 
 /// Provider leaderboard.

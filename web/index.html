@@ -237,6 +237,29 @@
 
   <!-- ── PROVIDERS ────────────────────────────────────────────────────────── -->
   <section class="page" id="page-providers" role="tabpanel" aria-labelledby="tab-providers" hidden>
+    <h2 class="section">Add a provider</h2>
+    <div class="card">
+      <h3>Point the gateway at a new upstream <span class="hint">added live — no restart</span></h3>
+      <form id="addProviderForm" novalidate>
+        <div class="sp-grid">
+          <label>Provider name
+            <input id="apName" autocomplete="off" placeholder="my-reseller" spellcheck="false">
+          </label>
+          <label>Base URL / host
+            <input id="apHost" autocomplete="off" placeholder="api.reseller.com  or  https://api.reseller.com/v1" spellcheck="false">
+          </label>
+        </div>
+        <label style="display:block;margin-top:var(--s2)">API key(s) — one per line, optional
+          <textarea id="apKeys" rows="3" spellcheck="false" placeholder="sk-…"></textarea>
+          <span class="note">keys are written to <code>~/keys/&lt;provider-id&gt;-keys.txt</code> and loaded immediately. Leave empty if you will add keys later via the Keys → Verify &amp; adopt form.</span>
+        </label>
+        <div class="settings-actions" style="margin-top:var(--s3);display:flex;align-items:center;gap:var(--s2)">
+          <button class="btn primary" id="apAddBtn" type="submit">Add provider</button>
+          <span class="note" id="apStatus"></span>
+        </div>
+      </form>
+    </div>
+
     <h2 class="section">Availability</h2>
     <div class="card">
       <h3>

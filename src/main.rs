@@ -20,6 +20,7 @@
 //! GET  /api/snapshot           one-shot JSON of everything
 //! GET  /api/keys?provider=…    per-key balances (masked)
 //! POST /api/keys/verify        verify a pasted key, adopt if funded
+//! POST /api/providers          add a provider (name + host + optional keys)
 //! POST /api/refresh            trigger a free balance sweep
 //! GET  /api/health             liveness
 //! ```
@@ -385,6 +386,28 @@ async fn route(app: Arc<App>, req: Request<hyper::body::Incoming>) -> Response<B
             }
             Err(e) => return api::bad(&format!("failed to save settings: {e}")),
         }
+    }
+    // Add a brand-new provider from the dashboard: name + host + optional keys.
+    // Unlike /api/settings (which replaces the whole doc), this is a narrow,
+    // validated create: the host is normalised, the id is derived from the name,
+    // and any pasted keys are written to the provider's own key file.
+    if path == "/api/providers" && method == Method::POST {
+        let body = match collect_body(req).await {
+            Ok(b) => b,
+            Err(e) => return api::bad(&e),
+        };
+        let v: serde_json::Value = match serde_json::from_slice(&body) {
+            Ok(v) => v,
+            Err(e) => return api::bad(&format!("invalid JSON: {e}")),
+        };
+        let label = v.get("label").and_then(|x| x.as_str()).unwrap_or("");
+        let host = v.get("host").and_then(|x| x.as_str()).unwrap_or("");
+        let keys: Vec<String> = v
+            .get("keys")
+            .and_then(|k| k.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+            .unwrap_or_default();
+        return api::ok(api::add_provider(&app, label, host, &keys));
     }
     if path == "/api/models/sync" && method == Method::POST {
         let a = app.clone();
