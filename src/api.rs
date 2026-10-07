@@ -434,8 +434,12 @@ pub fn keys_page(app: &Arc<App>, provider: &str, limit: usize) -> Value {
 /// adopted if it can actually serve at least a few requests.
 pub async fn verify_and_add(app: &Arc<App>, key: &str) -> Value {
     let key = key.trim();
-    if !key.starts_with("sk-") || key.len() < 20 {
-        return json!({ "ok": false, "error": "not a valid sk- key" });
+    if !crate::config::key_prefixes()
+        .iter()
+        .any(|p| key.starts_with(p.as_str()))
+        || key.len() < crate::config::key_min_len()
+    {
+        return json!({ "ok": false, "error": "key does not match a configured prefix" });
     }
     if app.lock().keys.contains_key(key) {
         return json!({ "ok": false, "error": "key already in the pool", "duplicate": true });

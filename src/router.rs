@@ -369,6 +369,52 @@ fn rewrite_model(body: &Bytes, map: &std::collections::HashMap<String, String>) 
 
 pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Body> {
     let (parts, body) = req.into_parts();
+
+    // GET /v1/models is advertised in this crate's own module docs but was never
+    // implemented, so the request fell through to a path that never resolves and
+    // hung until the client gave up. That is fatal for model discovery: CCR (and
+    // any OpenAI-compatible client) probes this endpoint to enumerate models.
+    //
+    // Answer it from what is already known - the union of declared models and the
+    // per-key `models_seen` - in the OpenAI list shape every client expects.
+    if parts.method == hyper::Method::GET
+        && parse_route(parts.uri.path(), &app.providers.read().unwrap()).path == "/v1/models"
+    {
+        let mut ids: Vec<String> = Vec::new();
+        {
+            // Declared models come from the live provider list (config + dashboard
+            // edits); probed models are what the free /v1/models check has seen.
+            for p in app.providers.read().unwrap().iter() {
+                for m in &p.models {
+                    if !ids.contains(m) {
+                        ids.push(m.clone());
+                    }
+                }
+            }
+            let st = app.lock();
+            for rt in st.providers.values() {
+                for m in &rt.models_seen {
+                    if !ids.contains(m) {
+                        ids.push(m.clone());
+                    }
+                }
+            }
+        }
+        ids.sort();
+        let data: Vec<serde_json::Value> = ids
+            .iter()
+            .map(|id| {
+                serde_json::json!({
+                    "id": id,
+                    "object": "model",
+                    "created": 0,
+                    "owned_by": "keyforge",
+                })
+            })
+            .collect();
+        return crate::api::ok(serde_json::json!({ "object": "list", "data": data }));
+    }
+
     let route = parse_route(parts.uri.path(), &app.providers.read().unwrap());
 
     // Buffer the request body once. Every retry replays these exact bytes, so a
