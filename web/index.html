@@ -355,21 +355,62 @@
         Which conversation spent what
         <span class="hint">a session is pinned to one key so spend is attributable</span>
       </h3>
+
+      <!-- Filter + exact lookup. Both are client-side over what the snapshot
+           already carries: there is no server endpoint that lists the rest. -->
+      <div class="row" id="sessionFilter" role="group" aria-label="Filter sessions"></div>
+
+      <div class="grid two">
+        <div class="field">
+          <label for="sessionSearch">Filter the sessions shown</label>
+          <input id="sessionSearch" type="text" autocomplete="off" autocapitalize="off"
+                 spellcheck="false" placeholder="session, client, model or key"
+                 aria-describedby="sessionNote">
+          <p class="help">Every column is searched, because nobody memorises a fingerprint.</p>
+        </div>
+        <div class="field">
+          <label for="sessionFp">Open one session by id</label>
+          <div class="row">
+            <input id="sessionFp" type="text" autocomplete="off" autocapitalize="off"
+                   spellcheck="false" placeholder="sid:… or a 16-character hash">
+            <button class="btn ghost" type="button" id="sessionLookup">Open</button>
+          </div>
+          <p class="help">Reaches any session, including ones too old to be listed below.</p>
+        </div>
+      </div>
+
       <div class="table-scroll">
         <table id="sessionTable">
-          <caption class="sr-only">Per-session cost, tokens and key assignment</caption>
+          <caption class="sr-only">Per-session cost, tokens, key assignment and reliability</caption>
           <thead><tr>
-            <th scope="col">Session</th><th scope="col">Provider</th><th scope="col">Key</th>
-            <th scope="col" class="num">Turns</th><th scope="col" class="num">Cost</th>
-            <th scope="col" class="num">In</th><th scope="col" class="num">Out</th>
-            <th scope="col" class="num">Data</th><th scope="col">Models</th><th scope="col">Last seen</th>
+            <th scope="col" aria-sort="none" data-sort="session">Session</th>
+            <th scope="col" aria-sort="none" data-sort="provider">Provider</th>
+            <th scope="col">Key</th>
+            <th scope="col" class="num" aria-sort="none" data-sort="turns">Turns</th>
+            <th scope="col" class="num" aria-sort="none" data-sort="cost">Cost</th>
+            <th scope="col" class="num" aria-sort="none" data-sort="inTokens">In</th>
+            <th scope="col" class="num" aria-sort="none" data-sort="outTokens">Out</th>
+            <th scope="col" class="num" aria-sort="none" data-sort="bytes">Data</th>
+            <th scope="col" class="num" aria-sort="none" data-sort="errors">Err</th>
+            <th scope="col" class="num" aria-sort="none" data-sort="maxLatencyMs">Slowest</th>
+            <th scope="col" aria-sort="none" data-sort="models">Models</th>
+            <th scope="col" aria-sort="descending" data-sort="lastSeen">Last seen</th>
           </tr></thead>
           <tbody></tbody>
         </table>
       </div>
+      <p class="sess-note" id="sessionNote"></p>
       <div class="empty" id="sessionEmpty" hidden>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="9" cy="7" r="4"/><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/></svg>
         <div>No sessions yet.</div>
+      </div>
+      <!-- Distinct from "no sessions yet": the gateway has them, the filter hid them. -->
+      <div class="empty" id="sessionNoMatch" hidden>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.6-3.6"/></svg>
+        <div>No session matches this filter.</div>
+        <div class="row" style="justify-content:center;margin-top:var(--s3)">
+          <button class="btn ghost" type="button" id="sessionClear">Clear filters</button>
+        </div>
       </div>
     </div>
   </section>
@@ -609,6 +650,8 @@
   <aside class="drawer" id="sdDrawer" role="dialog" aria-modal="true" aria-labelledby="sdTitle" hidden>
     <header>
       <h3 id="sdTitle">Session</h3>
+      <!-- data-ago hands the age to the existing 1s ticker, so this ages between refreshes without the drawer repainting. -->
+      <span class="hint" id="sdFresh">refreshed <span id="sdFreshAt" data-ago>—</span></span>
       <button class="btn ghost" type="button" id="sdClose" aria-label="Close session detail">Close</button>
     </header>
     <div id="sdBody"></div>

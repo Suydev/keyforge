@@ -381,7 +381,10 @@ mod tests {
             fp.to_string(),
             SessionState {
                 key: "sk-test000000000000000".into(),
-                provider: "tabi".into(),
+                // Session matching here is by fingerprint and message hash, so
+                // the provider label is inert. A synthetic one keeps the fixture
+                // honest about not depending on the live providers.json.
+                provider: "test-provider".into(),
                 last_seen,
                 msg_hashes: hashes,
                 ..Default::default()
@@ -397,7 +400,9 @@ mod tests {
             .iter()
             .map(|(r, c)| serde_json::json!({ "role": r, "content": c }))
             .collect();
-        serde_json::to_vec(&serde_json::json!({ "model": "claude-opus-5", "messages": arr }))
+        // The model is required by the request shape but never inspected:
+        // fingerprinting reads the system block and the first user message.
+        serde_json::to_vec(&serde_json::json!({ "model": "test-model", "messages": arr }))
             .unwrap()
     }
 

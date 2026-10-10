@@ -7,12 +7,13 @@
 //! need restarting when a key dies.
 //!
 //! # Surfaces
+//! Provider prefixes are `/<provider id>/v1/...`, where the ids are whatever
+//! `providers.json` configures (e.g. `/vyceai/v1/...` to force one provider).
 //! ```text
 //! POST /v1/messages            Anthropic Messages API (Claude Code)
 //! POST /v1/chat/completions    OpenAI-compatible (OpenCode)
 //! GET  /v1/models              model list
-//!      /tabi/v1/...            force KeyForge Token
-//!      /gorouter/v1/...        force GoRouter
+//!      /<provider id>/v1/...   force that provider
 //!      /auto/v1/...            explicit auto-route (same as bare /v1)
 //!
 //! GET  /                       dashboard
@@ -99,12 +100,25 @@ fn asset(body: &'static str, content_type: &'static str) -> Response<Body> {
     r
 }
 
-fn not_found(path: &str) -> Response<Body> {
+fn not_found(path: &str, app: &App) -> Response<Body> {
+    // Name the providers this gateway actually has: the prefix is only usable if
+    // it is configured, and a hint naming two ids that no longer exist sends the
+    // caller hunting for a route that can never be pinned.
+    let prefixes = app
+        .providers
+        .read()
+        .unwrap()
+        .iter()
+        .map(|p| format!("/{}/", p.id))
+        .collect::<Vec<_>>()
+        .join(" or ");
     let body = serde_json::json!({
         "error": {
             "type": "not_found",
             "message": format!("keyforge: no route for {path}"),
-            "hint": "API paths must start with /v1/ (optionally prefixed /tabi/ or /gorouter/). Dashboard is at /",
+            "hint": format!(
+                "API paths must start with /v1/ (optionally prefixed {prefixes}). Dashboard is at /"
+            ),
         }
     });
     let mut r = Response::new(full(serde_json::to_vec_pretty(&body).unwrap_or_default()));
@@ -437,7 +451,7 @@ async fn route(app: Arc<App>, req: Request<hyper::body::Incoming>) -> Response<B
         return router::handle_proxy(app, req).await;
     }
 
-    not_found(&path)
+    not_found(&path, &app)
 }
 
 fn query_param(query: &str, name: &str) -> Option<String> {

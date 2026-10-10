@@ -244,6 +244,12 @@ pub struct ProxyHealth {
     /// reinterpret a number that is already being read elsewhere.
     pub last_used_ms: u64,
     pub last_error: String,
+    /// Unix seconds of the last 429 this endpoint drew.
+    ///
+    /// Tracked separately from `fail` because a rate limit is not a proxy
+    /// failure: the dashboard needs to show "this egress is being throttled"
+    /// without also counting it towards permanent eviction. 0 = never throttled.
+    pub rate_limited_at: u64,
     /// EWMA connect latency in ms.
     pub ewma_ms: Option<f64>,
 }
@@ -305,6 +311,17 @@ pub fn cool_secs() -> u64 {
     env_u64("KEYFORGE_PROXY_COOL_SECS", COOL_SECS)
 }
 
+/// Cooldown applied to an egress that answered 429.
+///
+/// Shorter than [`cool_secs`]: a 429 is a throttle with a known end, not a dead
+/// endpoint, and leaving a merely-throttled address out of rotation for the full
+/// failure cooldown would shrink the pool for far longer than the throttle lasts.
+const RATE_LIMIT_COOL_SECS: u64 = 120;
+
+pub fn rate_limit_cool_secs() -> u64 {
+    env_u64("KEYFORGE_PROXY_RATE_COOL_SECS", RATE_LIMIT_COOL_SECS)
+}
+
 /// Consecutive failures before an endpoint is dropped from the pool entirely.
 ///
 /// Free proxies are not like paid ones: they do not usually recover. Keeping a
@@ -316,6 +333,20 @@ const EVICT_AFTER_FAILS: u32 = 3;
 
 pub fn evict_after_fails() -> u32 {
     env_u64("KEYFORGE_PROXY_EVICT_AFTER_FAILS", EVICT_AFTER_FAILS as u64) as u32
+}
+
+/// Whether `pick()` may return an endpoint that has never completed a real
+/// provider request.
+///
+/// On by default. Every unvetted endpoint is a coin flip that costs a connect
+/// plus a CONNECT handshake when it loses, and free proxy lists are mostly dead
+/// on arrival — so the honest rotation is the one where every member is known to
+/// work. Vetting runs unattended off the same candidate file, so the pool still
+/// refills itself; it just never routes through something unproven.
+///
+/// `KEYFORGE_PROXY_REQUIRE_VETTED=0` restores the old try-anything behaviour.
+pub fn require_vetted() -> bool {
+    env_u64("KEYFORGE_PROXY_REQUIRE_VETTED", 1) != 0
 }
 
 /// Below this many usable endpoints, the pool asks to be refilled.
@@ -381,6 +412,8 @@ impl ProxyPool {
 
         let mut list: Vec<ProxyEndpoint> = Vec::new();
         let mut skipped = 0usize;
+        let mut vetted_at: std::collections::HashMap<String, u64> =
+            std::collections::HashMap::new();
         for line in text.lines() {
             // Blank and comment-only lines are not failures, so they are not
             // counted as skipped — otherwise the header alone reads as 3 errors.
@@ -393,7 +426,22 @@ impl ProxyPool {
                 continue;
             }
             match ProxyEndpoint::parse(line) {
-                Some(e) => list.push(e),
+                Some(e) => {
+                    // Restore the vetted flag written by `save_file`. Without it a
+                    // restart would mark every proxy unmeasured again, and
+                    // `pick()` would route direct until a full re-vet completed.
+                    let vetted = line.rsplit('#').next().and_then(|c| {
+                        c.split_whitespace()
+                            .find_map(|w| w.strip_prefix("vetted="))
+                            .and_then(|v| v.parse::<u64>().ok())
+                            .filter(|v| *v > 0)
+                    });
+                    let addr = e.addr();
+                    list.push(e);
+                    if let Some(ts) = vetted {
+                        vetted_at.insert(addr, ts);
+                    }
+                }
                 None => skipped += 1,
             }
         }
@@ -419,7 +467,11 @@ impl ProxyPool {
             // discard the success/failure record that ranks them.
             h.retain(|k, _| keys.contains(k));
             for e in &list {
-                h.entry(e.addr()).or_default();
+                let addr = e.addr();
+                let st = h.entry(addr.clone()).or_default();
+                if let Some(ts) = vetted_at.get(&addr) {
+                    st.vetted_at = *ts;
+                }
             }
         }
         *self.endpoints.lock().unwrap_or_else(|e| e.into_inner()) = list;
@@ -474,10 +526,21 @@ impl ProxyPool {
         // how ten separate accounts came to share one egress IP and were
         // rate-limited together. Cooldowns stay in seconds; only the ordering key
         // is fine-grained.
+        //
+        // Endpoints that have never passed a real request are skipped entirely.
+        // A free proxy list is mostly dead on arrival, and handing one to a real
+        // request costs a TCP connect plus a CONNECT handshake before failing —
+        // paid again on every request until eviction notices. Skipping them keeps
+        // the rotation honest: the egress is named, and it works. Set
+        // KEYFORGE_PROXY_REQUIRE_VETTED=0 to fall back to trying anything.
+        let require_vetted = require_vetted();
         let mut best: Option<(u64, ProxyEndpoint)> = None;
         for e in &eps {
             let st = h.entry(e.addr()).or_default();
             if st.cool_until > t {
+                continue;
+            }
+            if require_vetted && st.vetted_at == 0 && st.ok == 0 {
                 continue;
             }
             // Past the eviction threshold but not yet swept: skip rather than
@@ -514,6 +577,24 @@ impl ProxyPool {
         }
     }
 
+    /// Mark an endpoint as having passed a real provider request, without
+    /// counting it as a production success.
+    ///
+    /// Vetting runs through a throwaway pool so it cannot pollute the real
+    /// pool's health counters — which meant a proxy that had just proved it
+    /// works was added back with `vetted_at = 0`, indistinguishable from one
+    /// that was never tested. `pick()` gates on this field, so the distinction
+    /// has to be carried across explicitly.
+    pub fn note_vetted(&self, addr: &str, ms: u64) {
+        let mut h = self.health.lock().unwrap_or_else(|e| e.into_inner());
+        let st = h.entry(addr.to_string()).or_default();
+        st.vetted_at = now();
+        st.ewma_ms = Some(match st.ewma_ms {
+            Some(p) => p * 0.7 + ms as f64 * 0.3,
+            None => ms as f64,
+        });
+    }
+
     pub fn note_ok(&self, addr: &str, ms: u64) {
         let mut h = self.health.lock().unwrap_or_else(|e| e.into_inner());
         let st = h.entry(addr.to_string()).or_default();
@@ -542,9 +623,38 @@ impl ProxyPool {
     }
 
 
+    /// Retire an egress that answered 429, without blaming the proxy itself.
+    ///
+    /// A rate limit is a property of the address the request LEFT from, not of
+    /// the endpoint or the key: the proxy connected fine, carried TLS fine and
+    /// was told to slow down. So this cools the endpoint and records nothing
+    /// else — in particular it does NOT touch `fail`/`consecutive_fail`, because
+    /// those drive permanent eviction and a working proxy that merely drew a
+    /// throttled request must still be in the pool tomorrow.
+    ///
+    /// Unknown addresses are ignored: not every 429 came through a proxy (a
+    /// DIRECT request has none), and that case must be a no-op, not a panic.
+    pub fn note_rate_limited(&self, addr: &str) {
+        let mut h = self.health.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(st) = h.get_mut(addr) else {
+            return;
+        };
+        st.cool_until = now() + rate_limit_cool_secs();
+        st.rate_limited_at = now();
+        // `last_error` is deliberately untouched: the last error is still the last
+        // error, and overwriting it with "429" would hide a real connect failure
+        // the dashboard needs to see.
+    }
+
     /// Endpoints that are neither cooling nor evicted, i.e. actually pickable.
+    ///
+    /// Counts only endpoints `pick()` would really return. Counting unvetted
+    /// entries here would make `needs_refill()` report a full pool while every
+    /// request goes direct, which is exactly the silent-degradation failure this
+    /// pool exists to avoid.
     pub fn healthy_count(&self) -> usize {
         let t = now();
+        let require_vetted = require_vetted();
         let eps = self
             .endpoints
             .lock()
@@ -552,10 +662,15 @@ impl ProxyPool {
             .clone();
         let h = self.health.lock().unwrap_or_else(|e| e.into_inner());
         eps.iter()
-            .filter(|e| {
-                h.get(&e.addr())
-                    .map(|s| s.cool_until <= t && s.consecutive_fail < evict_after_fails())
-                    .unwrap_or(true)
+            .filter(|e| match h.get(&e.addr()) {
+                Some(s) => {
+                    s.cool_until <= t
+                        && s.consecutive_fail < evict_after_fails()
+                        && (!require_vetted || s.vetted_at != 0 || s.ok != 0)
+                }
+                // No health row at all: the endpoint was added without ever being
+                // measured, so under the gate it is not pickable.
+                None => !require_vetted,
             })
             .count()
     }
@@ -641,13 +756,22 @@ impl ProxyPool {
                 _ => out.push_str(&format!("{}:{}", e.host, e.port)),
             }
             out.push_str(&format!(
-                "  # ok={} fail={} {}\n",
+                "  # ok={} fail={} {} vetted={}\n",
                 hst.ok,
                 hst.fail,
-                hst.ewma_ms.map(|v| format!("{}ms", v.round())).unwrap_or_else(|| "unmeasured".into())
+                hst.ewma_ms.map(|v| format!("{}ms", v.round())).unwrap_or_else(|| "unmeasured".into()),
+                hst.vetted_at
             ));
         }
         // Temp + rename so a crash mid-write cannot truncate the pool file.
+        // The parent directory may not exist yet — it is only created on demand,
+        // and without this every save failed with ENOENT, silently discarding the
+        // vetted set on each restart and forcing a full re-vet.
+        if let Some(dir) = path.parent() {
+            if !dir.as_os_str().is_empty() {
+                std::fs::create_dir_all(dir)?;
+            }
+        }
         let tmp = path.with_extension("txt.tmp");
         std::fs::write(&tmp, out.as_bytes())?;
         std::fs::rename(&tmp, path)?;
@@ -977,6 +1101,68 @@ mod tests {
     }
 
     #[test]
+    fn unvetted_proxies_are_never_picked() {
+        // The failure this prevents: a pool loaded from a free-proxy list where
+        // every entry is a coin flip. Routing through one costs a TCP connect
+        // plus a CONNECT handshake before failing, on every request, until
+        // eviction eventually notices.
+        let p = ProxyPool::new();
+        let e = ProxyEndpoint::parse("10.0.0.1:8000").unwrap();
+        *p.endpoints.lock().unwrap() = vec![e.clone()];
+        p.set_enabled(true);
+        assert!(
+            p.pick().is_none(),
+            "an endpoint that never completed a request must not be used"
+        );
+        p.note_vetted(&e.addr(), 120);
+        assert!(p.pick().is_some(), "a vetted endpoint becomes pickable");
+    }
+
+    #[test]
+    fn unvetted_proxies_do_not_count_as_healthy() {
+        // Otherwise `needs_refill()` reports a full pool while every request
+        // silently goes direct — the pool looks alive and does nothing.
+        let p = ProxyPool::new();
+        *p.endpoints.lock().unwrap() = vec![
+            ProxyEndpoint::parse("10.0.0.1:8000").unwrap(),
+            ProxyEndpoint::parse("10.0.0.2:8000").unwrap(),
+        ];
+        p.set_enabled(true);
+        assert_eq!(p.healthy_count(), 0);
+        assert!(p.needs_refill());
+        p.note_vetted("10.0.0.1:8000", 100);
+        assert_eq!(p.healthy_count(), 1);
+    }
+
+    #[test]
+    fn a_vetted_proxy_survives_a_save_load_cycle() {
+        // `vetted_at` is the only record that a proxy was ever proven good, and
+        // the pool file is how it survives a restart. If reload dropped it, every
+        // endpoint would silently return to "unvetted" on each boot and the pool
+        // would never route through anything again.
+        let dir = std::env::temp_dir().join("kf-vetted-roundtrip");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("proxies.txt");
+
+        let p = ProxyPool::new();
+        let e = ProxyEndpoint::parse("10.0.0.7:8000").unwrap();
+        *p.endpoints.lock().unwrap() = vec![e.clone()];
+        p.set_enabled(true);
+        p.note_vetted(&e.addr(), 250);
+        p.save_file(&path).unwrap();
+
+        let q = ProxyPool::new();
+        q.load_file(&path);
+        q.set_enabled(true);
+        assert!(
+            q.pick().is_some(),
+            "a vetted proxy must still be pickable after a restart"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn save_file_round_trips_and_orders_best_first() {
         let p = pool_with(3);
         p.note_ok("10.0.0.2:8000", 50);
@@ -1172,7 +1358,12 @@ mod tests {
         {
             let mut h = p.health.lock().unwrap();
             for e in &list {
-                h.entry(e.addr()).or_default();
+                let st = h.entry(e.addr()).or_default();
+                // `pick()` only returns endpoints that have completed a real
+                // request, so a synthetic pool has to start vetted — otherwise
+                // every rotation test below would just be asserting "nothing is
+                // pickable". The gating itself has its own tests further down.
+                st.vetted_at = now();
             }
         }
         *p.endpoints.lock().unwrap() = list;
@@ -1285,8 +1476,10 @@ mod tests {
         {
             let mut fh = std::fs::File::create(&f).unwrap();
             writeln!(fh, "# comment").unwrap();
-            writeln!(fh, "10.0.0.1:8000:u:p").unwrap();
-            writeln!(fh, "http://a:b@10.0.0.2:9000").unwrap();
+            // `vetted=` is what `save_file` writes; a hand-written entry without
+            // it is correctly treated as unproven and stays out of rotation.
+            writeln!(fh, "10.0.0.1:8000:u:p  # ok=2 fail=0 120ms vetted=1").unwrap();
+            writeln!(fh, "http://a:b@10.0.0.2:9000  # ok=1 fail=0 90ms vetted=1").unwrap();
             writeln!(fh, "not-a-proxy").unwrap();
         }
         let p = ProxyPool::new();

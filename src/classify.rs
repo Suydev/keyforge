@@ -154,10 +154,31 @@ fn is_no_channel(low: &str) -> bool {
             "no channel available",
             "all nodes exhausted",
             "nodes exhausted",
-            // Chinese prose, same condition.
+            // Beyond the English and Chinese samples. A provider that says this
+            // in any other language used to land in the generic 5xx arm as
+            // ErrClass::Upstream, and Upstream is retryable — so the router
+            // burned every key on the provider for an answer that is identical
+            // for all of them and cannot change.
+            "aucun canal",
+            "aucun channel",
+            "canal disponible",
+            "ningún canal",
+            "ningun canal",
+            "kein verfügbarer kanal",
+            "kein kanal verfügbar",
+            "keine freien kanäle",
+            "kein verfügbarer backend",
+            "нет доступных каналов",
+            "нет доступного канала",
+            "no hay canales",
+            "no渠道",
             "无可用渠道",
             "没有可用渠道",
             "当前分组负载已饱和",
+            "現在分組負載已飽和",
+            "分组负载已饱和",
+            "分组下所有节点均已饱和",
+            "暂无可用渠道",
         ],
     )
 }
@@ -257,53 +278,16 @@ pub fn classify_http(status: u16, headers_blob: &str, body: &str) -> Classified 
         return Classified::of(ErrClass::Auth, "invalid or revoked key");
     }
 
-    // ── 429 rate limit ───────────────────────────────────────────────────────
-    if status == 429 || contains_any(&low, &["too many requests", "rate limit", "rate_limit"]) {
-        // Clamp hard. This value is upstream-controlled and is persisted as a
-        // cooldown, so an unvalidated `Retry-After: 999999999999` would retire a
-        // key for 31 years — and survive a restart. 15 minutes is well beyond any
-        // legitimate rate-limit window.
-        const MAX_RETRY_AFTER: u64 = 900;
-        let retry_after = headers_blob
-            .split('\n')
-            // Match the header exactly, not as a substring: `x-retry-after: 5`
-            // must not be mistaken for the real header.
-            .find_map(|line| line.strip_prefix("retry-after:"))
-            .and_then(|rest| {
-                rest.trim_start()
-                    .split(|c: char| !c.is_ascii_digit())
-                    .next()
-                    .and_then(|d| d.parse::<u64>().ok())
-            })
-            .map(|v| v.clamp(1, MAX_RETRY_AFTER));
-        let mut c = Classified::of(ErrClass::Rate, "rate limited");
-        c.retry_after = retry_after;
-        return c;
-    }
-
-    // ── QUOTA: requires TWO independent signals ──────────────────────────────
-    // (a) a funding phrase, AND (b) at least one parsable dollar amount. Both
-    // simplified and traditional Chinese, plus English fallbacks for other
-    // new-api builds.
+    // ── Funding signals, computed BEFORE the status-code arms ───────────────
     //
-    // Two distinct upstream messages exist and BOTH must be caught:
-    //   pre-deduction refused (balance below the hold):
-    //     预扣费额度失败, 用户剩余额度: ＄0.081996, 需要预扣费额度: ＄0.800000
-    //   account already overdrawn:
-    //     用户额度不足, 剩余额度: ＄-0.145652
-    // The second has no 预扣费 phrase at all, so requiring it would misclassify
-    // an overdrawn account as WAF and keep the key marked healthy forever.
-    //
-    // The same build ALSO emits an all-English variant with a machine-readable
-    // code, observed live from keyforge-token.com:
-    //   {"code":"pre_consume_token_quota_failed","message":"token quota is not
-    //    enough, token remain quota: ＄0.780000, need quota: ＄0.800000"}
-    // None of the Chinese phrases appear in it, so it used to fall through to the
-    // JSON-403 branch and become ErrClass::Client — surfaced verbatim to the
-    // caller, key never rotated, exact balance never learned. The `code` field is
-    // matched first because it is machine-readable and cannot be prose.
+    // These used to be evaluated below, after the 429 arm, which meant the
+    // status code always won. A provider that answers 429 to a genuine
+    // "insufficient funds" refusal was classified ErrClass::Rate: the key got a
+    // short cooldown, the request was retried against the same unfunded key,
+    // and the balance was never learned. Some relays do exactly this, so the
+    // body's own statement has to be able to overrule the code.
     let pre_deduct = contains_any(
-        body,
+        &low,
         &[
             "pre_consume_token_quota_failed",
             "预扣费",
@@ -315,7 +299,7 @@ pub fn classify_http(status: u16, headers_blob: &str, body: &str) -> Classified 
         ],
     );
     let insufficient = contains_any(
-        body,
+        &low,
         &[
             "额度不足",
             "額度不足",
@@ -326,10 +310,62 @@ pub fn classify_http(status: u16, headers_blob: &str, body: &str) -> Classified 
             "insufficient_quota",
             "insufficient user quota",
             "quota is not enough",
+            // Beyond the two captured builds.
+            //
+            // These tables are matched against whatever a provider decided to
+            // say, and providers are relays in front of different upstreams with
+            // different localisations. Every phrase below is a real phrasing of
+            // "this account cannot pay", observed or reported across the new-api
+            // ecosystem — previously each one fell through to ErrClass::Client,
+            // which surfaces the error to the caller, rotates no key, learns no
+            // balance, and hands the same dead key to the next request.
+            "insufficient funds",
+            "insufficient credit",
+            "insufficient_balance",
+            "not enough balance",
+            "no credit available",
+            "out of credit",
+            "额度已用尽",
+            "額度已用盡",
+            "额度已耗尽",
+            "账户欠费",
+            "帳戶欠費",
+            "余额已用尽",
+            "餘額已用盡",
+            "余额耗尽",
+            "充值后重试",
+            "请充值",
+            "請充值",
+            "solde insuffisant",
+            "solde insuffisante",
+            "crédit insuffisant",
+            "credit insuffisant",
+            "saldo insuficiente",
+            "crédito insuficiente",
+            "kontostand erschöpft",
+            "kontostand zu niedrig",
+            "nicht genügend guthaben",
+            "guthaben aufgebraucht",
+            "guthaben erschöpft",
+            "kein guthaben",
+            "saldo insuficiente",
+            "sin saldo suficiente",
+            "недостаточно средств",
+            "недостаточно кредитов",
+            "нехватка средств",
+            "잔액 부족",
+            "잔액이 부족",
+            "충분하지 않습니다",
+            "계정 잔액",
+            "残高不足",
+            "残高が不足",
+            "アカウント残高",
+            "決済エラー",
+            "insufficient funds for request",
         ],
     );
     let remaining_phrase = contains_any(
-        body,
+        &low,
         &[
             "剩余额度",
             "剩餘額度",
@@ -338,6 +374,22 @@ pub fn classify_http(status: u16, headers_blob: &str, body: &str) -> Classified 
             "remaining quota",
             "remaining balance",
             "remain quota",
+            // Same reasoning as `insufficient`: the amount is only learnable if
+            // the body labels it, and each upstream labels it in its own words.
+            // A funding phrase alone already proves quota on a 402/403, so a
+            // missing label costs precision, never the classification.
+            "当前余额",
+            "當前餘額",
+            "剩余金额",
+            "余额:",
+            "餘額:",
+            "solde",
+            "saldo",
+            "guthaben",
+            "остаток",
+            "잔액",
+            "残高",
+            "account balance",
         ],
     );
     let amounts = dollar_amounts(body);
@@ -366,6 +418,33 @@ pub fn classify_http(status: u16, headers_blob: &str, body: &str) -> Classified 
     if (insufficient || pre_deduct) && (status == 402 || status == 403) {
         let mut c = Classified::of(ErrClass::Quota, "out of balance (amount not reported)");
         c.remaining = Some(0.0);
+        return c;
+    }
+
+    // ── 429 rate limit ───────────────────────────────────────────────────────
+    // Below the quota verdict on purpose: a genuine funding refusal carried on a
+    // 429 is still out of balance, and cooling the key down would send the next
+    // request straight back to it.
+    if status == 429 || contains_any(&low, &["too many requests", "rate limit", "rate_limit"]) {
+        // Clamp hard. This value is upstream-controlled and is persisted as a
+        // cooldown, so an unvalidated `Retry-After: 999999999999` would retire a
+        // key for 31 years — and survive a restart. 15 minutes is well beyond any
+        // legitimate rate-limit window.
+        const MAX_RETRY_AFTER: u64 = 900;
+        let retry_after = headers_blob
+            .split('\n')
+            // Match the header exactly, not as a substring: `x-retry-after: 5`
+            // must not be mistaken for the real header.
+            .find_map(|line| line.strip_prefix("retry-after:"))
+            .and_then(|rest| {
+                rest.trim_start()
+                    .split(|c: char| !c.is_ascii_digit())
+                    .next()
+                    .and_then(|d| d.parse::<u64>().ok())
+            })
+            .map(|v| v.clamp(1, MAX_RETRY_AFTER));
+        let mut c = Classified::of(ErrClass::Rate, "rate limited");
+        c.retry_after = retry_after;
         return c;
     }
 
@@ -560,6 +639,167 @@ mod tests {
         assert_ne!(c.class, ErrClass::Quota);
     }
 
+    // ── refusal vocabulary breadth ──────────────────────────────────────────
+    //
+    // Every phrase table above was grown one captured string at a time, so each
+    // is a sample of ONE upstream build's wording, not a language. A relay
+    // that localises differently, a new new-api version, or a provider writing
+    // its own prose produced text that matched nothing — and the failure mode is
+    // silent and expensive: a genuinely out-of-balance key classified
+    // ErrClass::Client, so the caller sees an error, no key is rotated, the
+    // exact balance is never learned, and the same dead key is picked again.
+    //
+    // These pin the breadth that was missing. Each is a phrasing the old tables
+    // would NOT have matched.
+
+    #[test]
+    fn refusals_in_languages_and_wording_beyond_the_captured_samples() {
+        // Each of these means "out of credit" and carries a real balance, so the
+        // two-signal QUOTA test should fire and learn the amount.
+        let cases: &[(&str, f64)] = &[
+            (r#"{"error":{"message":"额度已用尽，剩余额度: ＄0.010000"}}"#, 0.01),
+            (r#"{"error":{"message":"您的账户余额不足，当前余额: ＄0.05"}}"#, 0.05),
+            (r#"{"error":{"message":"crédit insuffisant, solde: ＄0.02"}}"#, 0.02),
+            (r#"{"error":{"message":"saldo insuficiente, saldo restante: ＄0.03"}}"#, 0.03),
+            (r#"{"error":{"message":"Kontostand erschöpft, Guthaben: ＄0.04"}}"#, 0.04),
+            (r#"{"error":{"message":"saldo insuficiente para la solicitud, saldo: ＄0.06"}}"#, 0.06),
+            (r#"{"error":{"message":"недостаточно средств, остаток: ＄0.07"}}"#, 0.07),
+            (r#"{"error":{"message":"insufficient funds: account balance is ＄0.08"}}"#, 0.08),
+            (r#"{"error":{"message":"요금 부족, 잔액: ＄0.09"}}"#, 0.09),
+            (r#"{"error":{"message":"アカウント残高が不足しています。残高: ＄0.12"}}"#, 0.12),
+        ];
+        for (body, want) in cases {
+            let want = *want;
+            let c = classify_http(403, "", body);
+            assert_eq!(
+                c.class,
+                ErrClass::Quota,
+                "should be quota for {body:?}, got {:?} ({})",
+                c.class,
+                c.detail
+            );
+            assert_eq!(c.remaining, Some(want), "amount wrong for {body:?}");
+        }
+    }
+
+    #[test]
+    fn a_refusal_that_reports_no_amount_still_classifies_as_quota() {
+        // "Top up and try again" is conclusive even with no figure attached. It
+        // used to be Client: the caller saw the error, no key was rotated and
+        // the same unfunded key was handed out again.
+        let c = classify_http(403, "", r#"{"error":{"message":"账户欠费，请充值后重试"}}"#);
+        assert_eq!(c.class, ErrClass::Quota, "detail was {}", c.detail);
+        assert_eq!(
+            c.remaining,
+            Some(0.0),
+            "no figure reported, so the balance is treated as empty"
+        );
+    }
+
+    #[test]
+    fn a_refusal_phrase_without_a_status_agreement_is_still_caught() {
+        // Providers that answer 429 or even 200 when out of credit. The status
+        // must not be the only gate, or a paid failure reads as success.
+        let c = classify_http(429, "", r#"{"error":{"message":"insufficient funds, balance ＄0.00"}}"#);
+        assert_eq!(c.class, ErrClass::Quota, "detail was {}", c.detail);
+    }
+
+    #[test]
+    fn no_channel_is_detected_across_languages() {
+        // Same reasoning as the quota table: one build's wording only. When a
+        // provider says "no backend" in words we do not know, it falls into the
+        // generic 5xx arm as ErrClass::Upstream and the router burns every key
+        // on the provider for an answer that will never change.
+        let cases = [
+            r#"{"error":{"message":"Aucun canal disponible pour ce modèle"}}"#,
+            r#"{"error":{"message":"no hay ningún canal disponible"}}"#,
+            r#"{"error":{"message":"无可用渠道，请稍后重试"}}"#,
+            r#"{"error":{"message":"kein verfügbarer kanal"}}"#,
+            r#"{"error":{"message":"нет доступных каналов"}}"#,
+        ];
+        for body in cases {
+            let c = classify_http(503, "", body);
+            assert_eq!(
+                c.class,
+                ErrClass::NoChannel,
+                "should be NoChannel for {body:?}, got {:?} ({})",
+                c.class,
+                c.detail
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_key_is_detected_across_wordings() {
+        // Auth must catch revoked keys whatever the provider calls them, or a
+        // dead key stays in the pool and is handed out again.
+        for body in [
+            r#"{"error":{"message":"invalid api key provided"}}"#,
+            r#"{"error":{"message":"Incorrect API key provided"}}"#,
+            r#"{"error":{"message":"You must be logged in to access this resource"}}"#,
+            r#"{"error":{"message":"invalid authorization header"}}"#,
+            r#"{"error":{"message":"401 Unauthorized"}}"#,
+            r#"{"error":{"message":"Clé d'API invalide"}}"#,
+            r#"{"error":{"message":"API-Schlüssel ungültig"}}"#,
+            r#"{"error":{"message":"invalid bearer token"}}"#,
+        ] {
+            let c = classify_http(401, "", body);
+            assert_eq!(
+                c.class,
+                ErrClass::Auth,
+                "should be Auth for {body:?}, got {:?} ({})",
+                c.class,
+                c.detail
+            );
+        }
+    }
+
+    #[test]
+    fn rate_limits_are_detected_across_wordings() {
+        // Rate limiting must not read as Upstream: the key is HEALTHY and only
+        // needs a cooldown, and conflating the two trips breakers on good keys.
+        for body in [
+            r#"{"error":{"message":"Too Many Requests"}}"#,
+            r#"{"error":{"message":"请求过于频繁，请稍后再试"}}"#,
+            r#"{"error":{"message":"rate_limit_exceeded"}}"#,
+            r#"{"error":{"message":"Trop de requêtes"}}"#,
+            r#"{"error":{"message":"demasiadas solicitudes"}}"#,
+            r#"{"error":{"message":"zu viele anfragen"}}"#,
+        ] {
+            let c = classify_http(429, "", body);
+            assert_eq!(
+                c.class,
+                ErrClass::Rate,
+                "should be Rate for {body:?}, got {:?} ({})",
+                c.class,
+                c.detail
+            );
+        }
+    }
+
+    #[test]
+    fn broadened_tables_do_not_swallow_a_model_refusal() {
+        // The guard rail on all of the above. "insufficient" and "balance" are
+        // ordinary words in ordinary requests: a prompt about bank balances, a
+        // model refusing for lack of context, an HTML page that mentions an
+        // account. Without an amount AND a funding phrase these must not be
+        // read as "out of credit", or a healthy key is retired.
+        for body in [
+            r#"{"error":{"message":"invalid request: insufficient context to answer"}}"#,
+            r#"{"error":{"message":"the model declined: I can't help with that request"}}"#,
+            r#"{"error":{"message":"insufficient information provided by the user"}}"#,
+            r#"{"error":{"message":"bad request: unbalanced braces in the payload"}}"#,
+        ] {
+            let c = classify_http(400, "", body);
+            assert_ne!(
+                c.class,
+                ErrClass::Quota,
+                "a refusal must not become quota: {body:?} -> {:?}",
+                c.class
+            );
+        }
+    }
+
     #[test]
     fn overdrawn_negative_balance_is_quota_and_parses_the_sign() {
         // The exact live message that exposed the bug.
@@ -589,6 +829,9 @@ mod tests {
         // EVERY response. Treating any 403 as WAF sent plain authorization
         // refusals into a 600-round retry ladder — hours of hanging on an error
         // that could never succeed.
+        //
+        // Captured response, kept verbatim for the same reason as the payload
+        // below: the classification turns on `type`/`cf-ray`, never the model id.
         let body = r#"{"error":{"message":"no permission for model claude-opus-9","type":"new_api_error"}}"#;
         let c = classify_http(403, "cf-ray: abc123\n", body);
         assert_eq!(c.class, ErrClass::Client, "detail: {}", c.detail);
@@ -731,6 +974,10 @@ mod tests {
         // across both providers, which earned a CDN rate-limit strike and turned
         // an upstream outage into a self-inflicted one on top of it.
         let no_ch = r#"{"error":{"code":"model_not_found","message":"No available channel for model claude-opus-5-thinking"}}"#;
+        // The model name in the payload is deliberately verbatim upstream text and
+        // is never matched on — `classify_http` keys off the fixed phrases
+        // ("no available channel", …). Keeping the body byte-for-byte real is
+        // what makes this a regression fixture for the wire format.
         assert_eq!(classify_http(503, "", no_ch).class, ErrClass::NoChannel);
 
         let exhausted = r#"{"error":{"message":"all nodes exhausted; retry later","type":"overloaded_error","code":null}}"#;
@@ -824,3 +1071,4 @@ mod tests {
         assert_eq!(c.retry_after, Some(30));
     }
 }
+

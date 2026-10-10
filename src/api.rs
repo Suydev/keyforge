@@ -434,8 +434,12 @@ pub fn keys_page(app: &Arc<App>, provider: &str, limit: usize) -> Value {
 /// adopted if it can actually serve at least a few requests.
 pub async fn verify_and_add(app: &Arc<App>, key: &str) -> Value {
     let key = key.trim();
-    if !key.starts_with("sk-") || key.len() < 20 {
-        return json!({ "ok": false, "error": "not a valid sk- key" });
+    if !crate::config::key_prefixes()
+        .iter()
+        .any(|p| key.starts_with(p.as_str()))
+        || key.len() < crate::config::key_min_len()
+    {
+        return json!({ "ok": false, "error": "key does not match a configured prefix" });
     }
     if app.lock().keys.contains_key(key) {
         return json!({ "ok": false, "error": "key already in the pool", "duplicate": true });
@@ -853,7 +857,10 @@ pub fn session_detail(app: &Arc<App>, fp: &str) -> Value {
         "api": s.api,
         "via": s.via,
         "provider": s.provider,
-        "key": s.key,
+        // Masked like every other endpoint. `SessionState.key` is the raw stored
+        // secret, and this one value was rendered verbatim in the dashboard's
+        // session drawer — the only place a full API key was ever exposed.
+        "key": mask(&s.key),
         "created": s.created,
         "lastSeen": s.last_seen,
         "ageSecs": now.saturating_sub(s.created),

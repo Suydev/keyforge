@@ -98,7 +98,7 @@ fn pipe(body: Incoming) -> Body {
 // ── request shape ───────────────────────────────────────────────────────────
 
 struct Route {
-    /// Explicitly pinned provider, if the caller used `/tabi/...` or `/gorouter/...`.
+    /// Explicitly pinned provider, if the caller used `/<provider id>/...`.
     pinned: Option<String>,
     /// Path to send upstream (always begins `/v1/...`).
     path: String,
@@ -369,6 +369,52 @@ fn rewrite_model(body: &Bytes, map: &std::collections::HashMap<String, String>) 
 
 pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Body> {
     let (parts, body) = req.into_parts();
+
+    // GET /v1/models is advertised in this crate's own module docs but was never
+    // implemented, so the request fell through to a path that never resolves and
+    // hung until the client gave up. That is fatal for model discovery: CCR (and
+    // any OpenAI-compatible client) probes this endpoint to enumerate models.
+    //
+    // Answer it from what is already known - the union of declared models and the
+    // per-key `models_seen` - in the OpenAI list shape every client expects.
+    if parts.method == hyper::Method::GET
+        && parse_route(parts.uri.path(), &app.providers.read().unwrap()).path == "/v1/models"
+    {
+        let mut ids: Vec<String> = Vec::new();
+        {
+            // Declared models come from the live provider list (config + dashboard
+            // edits); probed models are what the free /v1/models check has seen.
+            for p in app.providers.read().unwrap().iter() {
+                for m in &p.models {
+                    if !ids.contains(m) {
+                        ids.push(m.clone());
+                    }
+                }
+            }
+            let st = app.lock();
+            for rt in st.providers.values() {
+                for m in &rt.models_seen {
+                    if !ids.contains(m) {
+                        ids.push(m.clone());
+                    }
+                }
+            }
+        }
+        ids.sort();
+        let data: Vec<serde_json::Value> = ids
+            .iter()
+            .map(|id| {
+                serde_json::json!({
+                    "id": id,
+                    "object": "model",
+                    "created": 0,
+                    "owned_by": "keyforge",
+                })
+            })
+            .collect();
+        return crate::api::ok(serde_json::json!({ "object": "list", "data": data }));
+    }
+
     let route = parse_route(parts.uri.path(), &app.providers.read().unwrap());
 
     // Buffer the request body once. Every retry replays these exact bytes, so a
@@ -599,20 +645,13 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 waited += 2;
                 // Cheap liveness check: a free models probe on any provider.
-                if waited.is_multiple_of(6) {
-                    let prov = app.providers.read().unwrap().first().cloned();
-                    if let Some(p) = prov {
-                        let host = p.host;
-                        let pool = app.pool(p.id);
-                        if let Some(k) = pool.first() {
-                            if let upstream::Attempt::Ok(_) =
-                                upstream::probe_models(host, k).await
-                            {
-                                app.set_offline(false);
-                                break;
-                            }
-                        }
-                    }
+                // Probes ALL providers, not just the first — a single blocked or
+                // keyless first provider used to burn the whole 30s wait and
+                // repeat it every round, holding a request that a healthy
+                // provider could have served the entire time.
+                if waited.is_multiple_of(6) && crate::helpers::probe_any_provider(&app).await {
+                    app.set_offline(false);
+                    break;
                 }
             }
         }
@@ -797,7 +836,13 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
                         errors.push(format!("{provider_id}/{}: {message}", mask(&key)));
                         match c.class {
                             ErrClass::Offline => {
-                                app.set_offline(true);
+                                // This provider could not be reached. That is a
+                                // fact about the provider — a retired domain, a
+                                // dead DNS record — not about the phone's link.
+                                // Only the watchdog, which probes connectivity
+                                // targets that owe us nothing, may set the global
+                                // flag; doing it here held every request while
+                                // healthy providers served normally.
                                 log_error(
                                     &app,
                                     "OFFLINE",
@@ -1068,6 +1113,33 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
                         needed_save = true;
                         let ttl = c.retry_after.unwrap_or(config::cooldown_rate_secs());
                         app.mark_dead(&key, ttl, "rate limited");
+
+                        // Also retire the EGRESS, not just the key.
+                        //
+                        // Upstream rate limits are per-IP as much as per-account,
+                        // so cooling the key alone does not stop the next request
+                        // leaving from the same address and drawing the same 429 —
+                        // it just re-spends a key per round trip. Cooling the proxy
+                        // that actually served this 429 makes the retry leave from
+                        // somewhere else.
+                        //
+                        // Read `head.proxy`, NEVER `proxy::used_egress()`: the
+                        // latter is a task-local that has already been torn down
+                        // by the time we get here, so it always reads None. That
+                        // mistake is exactly why 137 stored error records once
+                        // carried `proxy: ""` and per-proxy blame was impossible.
+                        // `head.proxy` is captured inside the scope in `send_head`.
+                        let egress_note = if head.proxy.is_empty() {
+                            String::new()
+                        } else {
+                            crate::upstream::proxy_pool().note_rate_limited(&head.proxy);
+                            format!(
+                                "; egress {} cooled {}s",
+                                head.proxy,
+                                crate::proxy::rate_limit_cool_secs()
+                            )
+                        };
+
                         log_error(
                             &app,
                             "RATE",
@@ -1077,7 +1149,7 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
                             &model,
                             head.status,
                             &text,
-                            &format!("cooled-down {ttl}s"),
+                            &format!("cooled-down {ttl}s{egress_note}"),
                             fp,
                             round,
                             head.latency_ms,
@@ -1215,7 +1287,9 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
                         break;
                     }
                     ErrClass::Offline => {
-                        app.set_offline(true);
+                        // This provider is unreachable. Failing over to the next
+                        // one is the correct response; declaring the device
+                        // offline is not. Only the watchdog may set that flag.
                         transient = true;
                         break;
                     }
@@ -1397,13 +1471,19 @@ mod tests {
 
     #[test]
     fn provider_prefix_pins_and_strips() {
-        let r = parse_route("/tabi/v1/chat/completions", &provs());
-        assert_eq!(r.pinned.as_deref(), Some("tabi"));
+        // The prefixes are whatever `providers.json` configured, so derive them:
+        // a literal id here only passes on the machine that wrote the test.
+        let ps = provs();
+        assert!(ps.len() >= 2, "need two configured providers to tell them apart");
+        let (first, second) = (ps[0].id, ps[1].id);
+
+        let r = parse_route(&format!("/{first}/v1/chat/completions"), &ps);
+        assert_eq!(r.pinned.as_deref(), Some(first));
         assert_eq!(r.path, "/v1/chat/completions");
         assert_eq!(r.flavor, ApiFlavor::OpenAi);
 
-        let r = parse_route("/gorouter/v1/messages", &provs());
-        assert_eq!(r.pinned.as_deref(), Some("gorouter"));
+        let r = parse_route(&format!("/{second}/v1/messages"), &ps);
+        assert_eq!(r.pinned.as_deref(), Some(second));
         assert_eq!(r.path, "/v1/messages");
     }
 

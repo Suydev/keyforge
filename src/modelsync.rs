@@ -102,7 +102,16 @@ pub async fn discover(app: &Arc<App>) -> BTreeMap<String, Vec<String>> {
                 // Offline or provider down: say so, and change nothing.
                 let cls = crate::classify::classify_transport(&message);
                 if cls.class == crate::classify::ErrClass::Offline {
-                    app.set_offline(true);
+                    // A provider that cannot resolve is a broken provider, not a
+                    // broken phone. Latching the global flag here held every
+                    // request while other providers were serving normally.
+                    app.event(
+                        "warn",
+                        format!(
+                            "model sync: {} unreachable ({}) — model list unchanged",
+                            p.label, cls.detail
+                        ),
+                    );
                 } else {
                     app.event(
                         "warn",
@@ -300,6 +309,10 @@ mod tests {
 
     #[test]
     fn pretty_names_are_readable() {
+        // Real-looking ids are the POINT here, not a coupling: `pretty` splits on
+        // `-`, `_` and `.` and must render the separator styles the configured
+        // lineup actually uses. A synthetic "test-model" would not exercise the
+        // multi-part or version-fragment branches at all.
         assert_eq!(pretty("claude-opus-5-thinking"), "Claude Opus 5 Thinking");
         assert_eq!(pretty("gpt-5.6-sol"), "Gpt 5 6 Sol");
         assert_eq!(pretty("deepseek-v4-flash"), "Deepseek V4 Flash");
@@ -313,12 +326,12 @@ mod tests {
         //    and make every sync see a phantom diff;
         //  * `limit` must be present, because OpenCode auto-compacts against a
         //    model's declared context limit and has no threshold without one.
-        let ids: BTreeSet<String> = [
-            "claude-opus-5".to_string(),
-            "claude-opus-5-thinking".to_string(),
-        ]
-        .into_iter()
-        .collect();
+        // Ids are synthetic on purpose: nothing here asserts on a model NAME,
+        // only that each entry stays on one line and declares a limit. Keeping
+        // them real would imply a dependency on the configured lineup.
+        let ids: BTreeSet<String> = ["alpha-model".to_string(), "beta-model-preview".to_string()]
+            .into_iter()
+            .collect();
         let mut block = String::new();
         for (i, id) in ids.iter().enumerate() {
             block.push_str(&format!(

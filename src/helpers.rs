@@ -130,10 +130,15 @@ pub fn spawn_uptime_prober(app: Arc<App>) {
                         let c = crate::classify::classify_transport(&message);
                         failed += 1;
                         if c.class == crate::classify::ErrClass::Offline {
-                            // Unambiguously OUR network (DNS/route). Record
-                            // nothing and abandon the round.
+                            // This provider could not be reached. That is a
+                            // statement about the provider, not about the
+                            // phone's link, so it is recorded as this provider
+                            // being down and never flips the global flag. Only
+                            // `spawn_net_watchdog`, which probes connectivity
+                            // targets that owe us nothing, may claim we are
+                            // offline — a dead domain here used to hold every
+                            // request on a device with working internet.
                             offline_signal = true;
-                            app.set_offline(true);
                             pending_fails.clear();
                             staged.clear();
                             break;
@@ -163,8 +168,13 @@ pub fn spawn_uptime_prober(app: Arc<App>) {
             // likely to be one dead uplink than three simultaneous outages, so
             // treat it as offline and record NOTHING — otherwise switching wifi
             // off paints red bars across every provider.
+            // Every provider failing at once is strong evidence of a dead
+            // uplink, but it is still provider-shaped evidence. Confirm it
+            // against the link before saying so: this is where a single dead
+            // provider stopped being a provider problem and became a total
+            // outage for every request.
             let all_failed = probed > 0 && failed == probed;
-            if offline_signal || all_failed {
+            if (offline_signal || all_failed) && !device_online().await {
                 if !app.is_offline() {
                     app.set_offline(true);
                 }
@@ -207,15 +217,31 @@ pub fn spawn_balance_sweeper(app: Arc<App>) {
             if !batch.is_empty() {
                 eprintln!("[sweep] probing {} keys (free)", batch.len());
                 sweep_batch(&app, batch).await;
-                let (t_alive, t_funds) = app.provider_summary("tabi");
-                let (g_alive, g_funds) = app.provider_summary("gorouter");
-                eprintln!(
-                    "[sweep] done — tabi {t_alive} alive ${t_funds:.2} | gorouter {g_alive} alive ${g_funds:.2}"
-                );
+                eprintln!("[sweep] done — {}", sweep_summary(&app));
             }
             tokio::time::sleep(Duration::from_secs(config::sweep_interval_secs())).await;
         }
     });
+}
+
+/// One `id N alive $X` clause per CONFIGURED provider.
+///
+/// These used to be two hardcoded `provider_summary` calls. `providers.json` is
+/// user-editable, so that reported whatever two ids happened to be baked in at
+/// compile time — on any other provider set both clauses read "0 alive $0.00",
+/// which is a lie about the pools the sweeper had just refilled. Iterating the
+/// live list cannot go stale.
+fn sweep_summary(app: &App) -> String {
+    app.providers
+        .read()
+        .unwrap()
+        .iter()
+        .map(|p| {
+            let (alive, funds) = app.provider_summary(p.id);
+            format!("{} {alive} alive ${funds:.2}", p.id)
+        })
+        .collect::<Vec<_>>()
+        .join(" | ")
 }
 
 /// Keys whose balance we do not know, or have not checked recently.
@@ -286,8 +312,10 @@ async fn sweep_batch(app: &Arc<App>, keys: Vec<String>) {
                         if crate::classify::classify_transport(&message).class
                             == crate::classify::ErrClass::Offline
                         {
-                            app.set_offline(true);
-                            break; // stop the sweep; no network
+                            // Unreachable provider, not unreachable network.
+                            // Keep sweeping; only the watchdog decides the flag.
+                            app.mark_probed(&key);
+                            break; // this provider is down; stop probing it
                         }
                         app.mark_probed(&key);
                     }
@@ -369,39 +397,162 @@ pub fn spawn_state_flusher(app: Arc<App>) {
     });
 }
 
+/// Probe every provider until one answers. Returns `true` on the first success.
+///
+/// # Why this exists instead of probing `providers.first()`
+/// Probing only the first provider — and only that provider's first key — made
+/// the offline flag a property of ONE provider rather than of the network. If
+/// that provider was Cloudflare-blocked, out of keys, or simply drained its
+/// pool, the flag never cleared and every request was held forever even though
+/// the device had working internet and healthy providers sitting right behind
+/// it. Any provider answering is sufficient evidence the network is up; no
+/// single provider is authoritative.
+///
+/// An empty provider list or an empty key pool counts as "cannot judge", which
+/// callers treat as healthy. Refusing to go offline on absent evidence is the
+/// safe direction: the cost of a wrong `false` is a failed request the client
+/// can retry, while a wrong `true` silently holds traffic indefinitely.
+pub async fn probe_any_provider(app: &App) -> bool {
+    let providers = app.providers.read().unwrap().clone();
+    if providers.is_empty() {
+        return true;
+    }
+    let mut any_had_key = false;
+    for p in providers {
+        // Rotates through the pool so a provider whose FIRST key is dead but
+        // whose other keys are funded still proves liveness.
+        for k in app.pool(&p.id).into_iter().take(3) {
+            any_had_key = true;
+            if let upstream::Attempt::Ok(_) = upstream::probe_models(&p.host, &k).await {
+                return true;
+            }
+        }
+    }
+    // Nothing to probe at all: no keys loaded. Not evidence of a dead network.
+    !any_had_key
+}
+
+/// Whether the DEVICE has lost connectivity.
+///
+/// # The distinction this exists to enforce
+/// "Offline" is a claim about the phone's link, not about any provider. A
+/// provider with a dead DNS record, a retired domain, or a bad cert produces the
+/// same `classify_transport` verdict as a phone in a tunnel — and inferring
+/// "offline" from it holds every request, on a device whose internet is working
+/// perfectly. That is the single most expensive bug in the gateway: it does not
+/// fail loudly, it silently stops serving traffic.
+///
+/// So liveness is judged against the network, not against the providers. A probe
+/// target is only allowed to declare the device offline when **every** target
+/// independently fails to resolve or connect — one bad hostname is a bad
+/// hostname, not a dead link.
+///
+/// Failures are counted per-host so a permanently broken provider cannot
+/// outvote a working one: a host that has never once answered is retried on a
+/// slower schedule, and is never counted toward "everything failed" until it has
+/// actually been tried recently.
+static NET_FAILS: std::sync::Mutex<Option<std::collections::HashMap<String, u32>>> =
+    std::sync::Mutex::new(None);
+
+const NET_PROBE_TARGETS: &[&str] = &[
+    // Deliberately infrastructure, never a configured provider: these must not
+    // be affected by a key being empty, a provider being disabled, or a domain
+    // being retired. Any one of them answering proves the link works.
+    "1.1.1.1",
+    "8.8.8.8",
+];
+
+/// Record a transport failure against the device, not against a provider.
+///
+/// Returns `true` when enough *independent* hosts have failed to justify
+/// declaring the link down. A caller reporting a provider-level failure passes
+/// `None`, which never counts — a single unreachable provider is not evidence.
+pub fn note_network_failure(host: Option<&str>) -> bool {
+    let host = match host {
+        Some(h) => h,
+        // Provider-level failure. Not our network's fault by definition.
+        None => return false,
+    };
+    let mut g = NET_FAILS.lock().unwrap_or_else(|e| e.into_inner());
+    let m = g.get_or_insert_with(Default::default);
+    let e = m.entry(host.to_string()).or_insert(0);
+    *e = e.saturating_add(1);
+    // Every target must fail NET_FAILS_BEFORE_OFFLINE times before we claim the
+    // link is down. One blip on one host is not a disconnection, and a brief
+    // radio stall during a wake-from-sleep is routine on a phone — treating that
+    // as "offline" holds every request for as long as the stall lasts, which is
+    // the exact failure this whole path exists to prevent.
+    NET_PROBE_TARGETS
+        .iter()
+        .all(|t| m.get(*t).copied().unwrap_or(0) >= NET_FAILS_BEFORE_OFFLINE)
+}
+
+pub fn note_network_success() {
+    let mut g = NET_FAILS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(m) = g.as_mut() {
+        m.clear();
+    }
+}
+
+/// Consecutive failed rounds against EVERY target before the link is called down.
+///
+/// Three rounds at the watchdog's 20s cadence is a full minute of the phone
+/// being unable to open a single TCP connection — well past a radio stall, and
+/// unambiguous evidence that the caller is not going to get an answer anyway.
+const NET_FAILS_BEFORE_OFFLINE: u32 = 3;
+
+/// Poll connectivity targets that owe us nothing: no key, no provider, no config.
+///
+/// Used by the watchdog to decide the offline flag from the link itself.
+///
+/// A TCP connect rather than a lookup: these targets are bare IPs precisely so
+/// no resolver is involved, and `lookup_host` on an IP literal is not reliable
+/// across platforms — it failed here while the device was plainly online. If we
+/// cannot tell the link is down, we must not claim that it is.
+pub async fn device_online() -> bool {
+    use std::time::Duration as D;
+    for host in NET_PROBE_TARGETS {
+        // Two attempts per round: a connect that fails fast and one that is
+        // given a little longer, so a single slow handshake cannot be mistaken
+        // for a dead link.
+        for attempt in 0..2 {
+            let budget = D::from_secs(if attempt == 0 { 3 } else { 6 });
+            let ok = tokio::time::timeout(budget, tokio::net::TcpStream::connect((*host, 443)))
+                .await
+                .map(|r| r.is_ok())
+                .unwrap_or(false);
+            if ok {
+                note_network_success();
+                return true;
+            }
+        }
+        note_network_failure(Some(host));
+    }
+    false
+}
+
 /// While offline, checks for the network coming back so held requests resume
 /// immediately — no fixed timer, no client-visible retry counter.
+///
+/// The flag describes the DEVICE's link, so the watchdog tests the link. It used
+/// to ask the providers instead, which meant one provider with a retired domain
+/// kept re-declaring the phone offline and the banner never went away — the
+/// gateway was fully capable of serving traffic the entire time.
 pub fn spawn_net_watchdog(app: Arc<App>) {
     tokio::spawn(async move {
         let mut fail_streak = 0u32;
         loop {
             if app.is_offline() {
-                // Try to come back online: probe any provider's /v1/models.
-                let prov = app.providers.read().unwrap().first().cloned();
-                if let Some(p) = prov {
-                    if let Some(k) = app.pool(p.id).first() {
-                        if let upstream::Attempt::Ok(_) = upstream::probe_models(p.host, k).await {
-                            fail_streak = 0;
-                            app.set_offline(false);
-                        }
-                    }
+                if device_online().await {
+                    fail_streak = 0;
+                    app.set_offline(false);
                 }
                 tokio::time::sleep(Duration::from_secs(5)).await;
             } else {
                 // Check liveness less often. A single failure does NOT flip us
                 // offline — WiFi with no internet would otherwise hold every
                 // request forever. Require 3 consecutive failures first.
-                let prov = app.providers.read().unwrap().first().cloned();
-                let ok = if let Some(p) = prov {
-                    if let Some(k) = app.pool(p.id).first() {
-                        matches!(upstream::probe_models(p.host, k).await, upstream::Attempt::Ok(_))
-                    } else {
-                        true
-                    }
-                } else {
-                    true
-                };
-                if ok {
+                if device_online().await {
                     fail_streak = 0;
                 } else {
                     fail_streak += 1;
@@ -489,7 +640,7 @@ pub async fn probe_all_unprobed(app: Arc<App>, reason: &str) {
                         if crate::classify::classify_transport(&message).class
                             == crate::classify::ErrClass::Offline
                         {
-                            app.set_offline(true);
+                            app.mark_probed(&key);
                             break;
                         }
                         app.mark_probed(&key);
@@ -734,7 +885,11 @@ async fn refill_proxies(app: &Arc<App>) -> usize {
         }
         for h in set {
             checked += 1;
-            if let Ok((ep, Ok(_ms))) = h.await {
+            if let Ok((ep, Ok(ms))) = h.await {
+                // Record the vetted latency, which was previously discarded. It is
+                // the only measurement of this proxy we will ever have before it
+                // serves its first real request, and `pick()` orders on it.
+                pool.note_vetted(&ep.addr(), ms);
                 good.push(ep);
             }
         }
@@ -809,10 +964,5 @@ pub async fn sweep_now(app: Arc<App>) {
         format!("refresh: probing {} keys (free)", batch.len()),
     );
     sweep_batch(&app, batch).await;
-    let (t_alive, t_funds) = app.provider_summary("tabi");
-    let (g_alive, g_funds) = app.provider_summary("gorouter");
-    app.event(
-        "info",
-        format!("refresh done — tabi {t_alive} alive ${t_funds:.2} | gorouter {g_alive} alive ${g_funds:.2}"),
-    );
+    app.event("info", format!("refresh done — {}", sweep_summary(&app)));
 }

@@ -587,13 +587,22 @@ impl App {
             let text = std::fs::read_to_string(&path).unwrap_or_default();
             let mut seen = std::collections::HashSet::new();
             let mut keys = Vec::new();
-            let prefix = crate::config::key_prefix();
+            let prefixes = crate::config::key_prefixes();
             let min_len = crate::config::key_min_len();
             for line in text.lines() {
                 let k = line.trim();
-                // Ignore comments/blank lines; require the key prefix so a
-                // stray README line can never become a "key".
-                if k.starts_with(&prefix) && k.len() >= min_len && seen.insert(k.to_string()) {
+                // Ignore comments/blank lines; require a configured key prefix so
+                // a stray README line can never become a "key".
+                //
+                // Use the same prefix set as verify_and_add. This used to read the
+                // single `key_prefix()`, so a deployment configured with
+                // KEYFORGE_KEY_PREFIXES loaded nothing from disk while pasting
+                // the same key through the dashboard succeeded - the two entry
+                // points disagreed about what a valid key looks like.
+                if prefixes.iter().any(|p| k.starts_with(p.as_str()))
+                    && k.len() >= min_len
+                    && seen.insert(k.to_string())
+                {
                     keys.push(k.to_string());
                 }
             }
@@ -820,10 +829,10 @@ impl App {
     ///   provider may still serve a model it does not list.
     /// * **breaker** — while the circuit is open the provider is effectively last.
     ///
-    /// `preferred` (an explicit `/tabi/...` route, or the session's existing
-    /// provider) always wins, because session stickiness matters more than a
-    /// marginal latency difference: switching &hosts mid-conversation means a new
-    /// key, a new account wallet, and a lost prompt cache.
+    /// `preferred` (an explicit `/<provider id>/...` route, or the session's
+    /// existing provider) always wins, because session stickiness matters more
+    /// than a marginal latency difference: switching &hosts mid-conversation
+    /// means a new key, a new account wallet, and a lost prompt cache.
     pub fn provider_order(&self, preferred: Option<&str>) -> Vec<String> {
         self.provider_order_for(preferred, "")
     }
@@ -2147,12 +2156,34 @@ fn pid_alive(pid: i32) -> bool {
 mod tests {
     use super::*;
 
+    /// Synthetic model label for tests that key metrics/holds by model name.
+    ///
+    /// Models are opaque strings to the code under test (a map key in
+    /// `g.models`, `observed_hold`), so a real-looking name is not needed and
+    /// would only imply a dependency on the configured lineup that does not
+    /// exist. Anything could break if a future test started resolving this
+    /// against `providers.json`, which is precisely the coupling being avoided.
+    const TEST_MODEL: &str = "test-model";
+
+    /// Provider label for key-selection tests.
+    ///
+    /// `candidates()` is a pure function over the key map: it filters on
+    /// `usable()`, which never consults `providers.json`, so the provider these
+    /// keys are filed under is just a bucket name. Naming a real provider here
+    /// only re-couples the test to the configured ids.
+    const TEST_PROVIDER: &str = "test-provider";
+
+    /// A SECOND distinct synthetic provider, for the tests that assert metrics
+    /// aggregate across providers. Must differ from [`TEST_PROVIDER`] or the
+    /// "across providers" claim would be silently untested.
+    const TEST_PROVIDER_2: &str = "test-provider-2";
+
     fn app_with(balances: &[(&str, Option<f64>)]) -> App {
         let app = App::new();
         {
             let mut g = app.lock();
             for (k, b) in balances {
-                let mut st = KeyState::new("tabi", 120.0);
+                let mut st = KeyState::new(TEST_PROVIDER, 120.0);
                 st.balance = *b;
                 if b.is_some() {
                     st.usage_cents = Some((120.0 - b.unwrap()) * 100.0);
@@ -2161,7 +2192,7 @@ mod tests {
             }
         }
         app.pools.lock().unwrap().insert(
-            "tabi".into(),
+            TEST_PROVIDER.into(),
             balances.iter().map(|(k, _)| k.to_string()).collect(),
         );
         app
@@ -2175,7 +2206,7 @@ mod tests {
             ("sk-low00000000000000000", Some(5.0)),
             ("sk-mid00000000000000000", Some(40.0)),
         ]);
-        let c = app.candidates("tabi", "fp1", &[]);
+        let c = app.candidates(TEST_PROVIDER, "fp1", &[]);
         assert_eq!(c.first().unwrap(), "sk-low00000000000000000");
     }
 
@@ -2185,7 +2216,7 @@ mod tests {
             ("sk-empty000000000000000", Some(0.10)), // < 0.80 hold
             ("sk-ok00000000000000000x", Some(50.0)),
         ]);
-        let c = app.candidates("tabi", "fp1", &[]);
+        let c = app.candidates(TEST_PROVIDER, "fp1", &[]);
         assert!(!c.contains(&"sk-empty000000000000000".to_string()));
         assert_eq!(c.len(), 1);
     }
@@ -2196,7 +2227,7 @@ mod tests {
             ("sk-unprobed00000000000x", None),
             ("sk-probed0000000000000x", Some(90.0)),
         ]);
-        let c = app.candidates("tabi", "fp1", &[]);
+        let c = app.candidates(TEST_PROVIDER, "fp1", &[]);
         assert_eq!(c.first().unwrap(), "sk-probed0000000000000x");
     }
 
@@ -2206,7 +2237,7 @@ mod tests {
             ("sk-a000000000000000000x", Some(10.0)),
             ("sk-b000000000000000000x", Some(20.0)),
         ]);
-        let c = app.candidates("tabi", "fp1", &["sk-a000000000000000000x".to_string()]);
+        let c = app.candidates(TEST_PROVIDER, "fp1", &["sk-a000000000000000000x".to_string()]);
         assert_eq!(c, vec!["sk-b000000000000000000x".to_string()]);
     }
 
@@ -2214,7 +2245,7 @@ mod tests {
     fn dead_key_is_excluded_until_ttl_expires() {
         let app = app_with(&[("sk-dead00000000000000x0", Some(50.0))]);
         app.mark_dead("sk-dead00000000000000x0", 3600, "quota");
-        assert!(app.candidates("tabi", "fp1", &[]).is_empty());
+        assert!(app.candidates(TEST_PROVIDER, "fp1", &[]).is_empty());
     }
 
     #[test]
@@ -2229,13 +2260,13 @@ mod tests {
                 "other-fp".into(),
                 SessionState {
                     key: "sk-owned00000000000000x".into(),
-                    provider: "tabi".into(),
+                    provider: TEST_PROVIDER.into(),
                     last_seen: config::now_secs(),
                     ..Default::default()
                 },
             );
         }
-        let c = app.candidates("tabi", "my-fp", &[]);
+        let c = app.candidates(TEST_PROVIDER, "my-fp", &[]);
         // Even though the owned key has a lower balance (drain-first would
         // prefer it), isolation must win so two agents don't share a key.
         assert_eq!(c.first().unwrap(), "sk-free000000000000000x");
@@ -2259,9 +2290,9 @@ mod tests {
         app.record_request(
             "fp",
             "",
-            "tabi",
+            TEST_PROVIDER,
             "sk-spend0000000000000x0",
-            "claude-opus-5",
+            TEST_MODEL,
             true,
             900,
             1000,
@@ -2286,9 +2317,9 @@ mod tests {
         app.record_request(
             "f1",
             "",
-            "tabi",
+            TEST_PROVIDER,
             "sk-m000000000000000000x",
-            "claude-opus-5",
+            TEST_MODEL,
             true,
             100,
             1,
@@ -2300,9 +2331,9 @@ mod tests {
         app.record_request(
             "f2",
             "",
-            "gorouter",
+            TEST_PROVIDER_2,
             "sk-m000000000000000000x",
-            "claude-opus-5",
+            TEST_MODEL,
             true,
             200,
             1,
@@ -2312,7 +2343,7 @@ mod tests {
             5,
         );
         let g = app.lock();
-        let m = g.models.get("claude-opus-5").unwrap();
+        let m = g.models.get(TEST_MODEL).unwrap();
         assert_eq!(m.requests, 2);
         assert_eq!(m.by_provider.len(), 2);
         assert!((m.cost - 0.3).abs() < 1e-9);
@@ -2350,13 +2381,87 @@ mod tests {
         app
     }
 
+    /// The ids of the providers this app is actually configured with, in
+    /// configured order.
+    ///
+    /// `providers.json` is the source of truth for the ladder, so a test that
+    /// names `tabi`/`gorouter`/`justwoker` is asserting against ids the running
+    /// gateway may not have at all: `provider_order` can only ever return real
+    /// ids, and the failure that follows reads as a scoring bug rather than a
+    /// stale fixture. Deriving the ids keeps these tests testing the scoring.
+    fn pids(app: &App) -> Vec<String> {
+        app.providers
+            .read()
+            .unwrap()
+            .iter()
+            .map(|p| p.id.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn derived_ids_are_the_only_ids_the_ladder_can_return() {
+        // The invariant every smart-routing test below now rests on.
+        //
+        // `app_all_providers` funds the pool from whatever `app.providers`
+        // actually holds, and `provider_order` can only ever return those ids.
+        // So a test that names a provider — `tabi`, `gorouter`, `justwoker`, or
+        // anything else that used to be configured — silently stops testing what
+        // it claims to:
+        //
+        //   * if the literal is NOT configured, the assertion can never match and
+        //     the test fails with a diff that reads like a scoring bug;
+        //   * if it IS configured but is a DIFFERENT rung than intended, the
+        //     test still passes while asserting something else entirely — the
+        //     worst outcome, because it is green and wrong.
+        //
+        // Pinning it here means a future test that reintroduces a literal fails
+        // here first, loudly, instead of one day misattributing a real routing
+        // regression to a stale fixture.
+        let app = app_all_providers();
+        let ids = pids(&app);
+        let configured = app.providers.read().unwrap();
+
+        assert!(
+            ids.len() >= 3,
+            "these tests reason about a fast rung, a slow rung and an unmeasured \
+             rung; got {} configured providers",
+            ids.len()
+        );
+        assert_eq!(
+            ids.len(),
+            configured.len(),
+            "`pids` must see exactly the configured providers"
+        );
+        for (i, p) in configured.iter().enumerate() {
+            assert_eq!(ids[i], p.id, "`pids` must preserve configured order");
+        }
+
+        // The ladder may only return ids from that set — the property the
+        // literal-id tests silently violated.
+        let known: std::collections::HashSet<&str> =
+            ids.iter().map(|s| s.as_str()).collect();
+        for rung in 0..ids.len() {
+            app.note_latency(&ids[rung], 500 + rung as u64 * 100);
+        }
+        let order = app.provider_order(None);
+        assert_eq!(order.len(), ids.len(), "order was {order:?}");
+        for id in &order {
+            assert!(
+                known.contains(id.as_str()),
+                "{id} is not a configured provider; order was {order:?}"
+            );
+        }
+    }
+
     #[test]
     fn faster_provider_is_preferred() {
         let app = app_all_providers();
-        app.note_latency("tabi", 4000);
-        app.note_latency("gorouter", 900);
-        app.note_latency("justwoker", 2000);
-        assert_eq!(app.provider_order(None).first().unwrap(), "gorouter");
+        let ids = pids(&app);
+        app.note_latency(&ids[0], 4000);
+        app.note_latency(&ids[1], 900); // the fastest rung
+        app.note_latency(&ids[2], 2000);
+        let order = app.provider_order(None);
+        assert_eq!(order.first().unwrap(), &ids[1], "order was {order:?}");
     }
 
     #[test]
@@ -2364,67 +2469,91 @@ mod tests {
         // A &host that is slightly faster but frequently fails must lose: a retry
         // costs a whole round trip, which the user actually feels.
         let app = app_all_providers();
-        app.note_latency("tabi", 1000);
+        let ids = pids(&app);
+        app.note_latency(&ids[0], 1000);
         for _ in 0..6 {
-            app.note_provider_fail("tabi");
+            app.note_provider_fail(&ids[0]);
         }
-        app.note_latency("gorouter", 1400);
+        app.note_latency(&ids[1], 1400);
         let order = app.provider_order(None);
-        assert_eq!(order.first().unwrap(), "gorouter", "order was {order:?}");
+        assert_eq!(order.first().unwrap(), &ids[1], "order was {order:?}");
     }
 
     #[test]
     fn three_consecutive_failures_open_the_breaker() {
         let app = app_all_providers();
-        assert!(!app.breaker_open("tabi"));
-        app.note_provider_fail("tabi");
-        app.note_provider_fail("tabi");
-        assert!(!app.breaker_open("tabi"), "must tolerate transient blips");
-        app.note_provider_fail("tabi");
-        assert!(app.breaker_open("tabi"), "3 in a row is an outage");
+        let ids = pids(&app);
+        assert!(!app.breaker_open(&ids[0]));
+        app.note_provider_fail(&ids[0]);
+        app.note_provider_fail(&ids[0]);
+        assert!(!app.breaker_open(&ids[0]), "must tolerate transient blips");
+        app.note_provider_fail(&ids[0]);
+        assert!(app.breaker_open(&ids[0]), "3 in a row is an outage");
     }
 
     #[test]
     fn success_closes_the_breaker_immediately() {
         let app = app_all_providers();
+        let ids = pids(&app);
         for _ in 0..5 {
-            app.note_provider_fail("tabi");
+            app.note_provider_fail(&ids[0]);
         }
-        assert!(app.breaker_open("tabi"));
-        app.note_latency("tabi", 800);
-        assert!(!app.breaker_open("tabi"), "recovery must be automatic");
+        assert!(app.breaker_open(&ids[0]));
+        app.note_latency(&ids[0], 800);
+        assert!(!app.breaker_open(&ids[0]), "recovery must be automatic");
     }
 
     #[test]
     fn open_breaker_sinks_provider_to_the_back() {
         let app = app_all_providers();
-        // tabi is by far the fastest, but broken.
-        app.note_latency("tabi", 100);
-        app.note_latency("gorouter", 3000);
-        app.note_latency("justwoker", 3000);
+        let ids = pids(&app);
+        // ids[0] is by far the fastest, but broken.
+        app.note_latency(&ids[0], 100);
+        app.note_latency(&ids[1], 3000);
+        app.note_latency(&ids[2], 3000);
         for _ in 0..3 {
-            app.note_provider_fail("tabi");
+            app.note_provider_fail(&ids[0]);
         }
         let order = app.provider_order(None);
-        assert_eq!(order.last().unwrap(), "tabi", "order was {order:?}");
+        assert_eq!(order.last().unwrap(), &ids[0], "order was {order:?}");
     }
 
     #[test]
     fn provider_without_the_model_is_dropped_when_someone_has_it() {
+        const SERVES: &str = "test-model-some-providers-serve";
         let app = app_all_providers();
-        app.note_latency("tabi", 200); // fastest, but lacks the model
-        // Set models_seen for ALL providers dynamically
-        for p in &*app.providers.read().unwrap() {
-            if p.id == "gorouter" {
-                app.set_models_seen(&p.id, vec!["claude-opus-5".into()]);
-            } else {
-                app.set_models_seen(&p.id, vec!["claude-opus-4-8".into()]);
+        let ids = pids(&app);
+
+        // Clear the DECLARED model lists for every provider. The routing code
+        // unions them with the probed list and treats a declared match as
+        // authoritative, so a real `providers.json` that lists the model would
+        // otherwise keep the "lacks the model" rung in the ladder and the
+        // exclusion this test exists to prove could never fire.
+        for id in &ids {
+            let mut s = app.settings.lock().unwrap();
+            if let Some(p) = s.providers.iter_mut().find(|p| &p.id == id) {
+                p.models.clear();
             }
         }
 
-        let order = app.provider_order_for(None, "claude-opus-5");
-        assert_eq!(order.first().unwrap(), "gorouter", "order was {order:?}");
-        assert!(!order.contains(&"tabi".to_string()), "tabi lacks the model, order was {order:?}");
+        // ids[1] is the fastest provider but does not serve the model; ids[0] is
+        // slower and does. Latency alone would rank ids[1] first.
+        app.note_latency(&ids[1], 200);
+        for (i, id) in ids.iter().enumerate() {
+            if i == 0 {
+                app.set_models_seen(id, vec![SERVES.into()]);
+            } else {
+                app.set_models_seen(id, vec!["some-other-model".into()]);
+            }
+        }
+
+        let order = app.provider_order_for(None, SERVES);
+        assert_eq!(order.first().unwrap(), &ids[0], "order was {order:?}");
+        assert!(
+            !order.contains(&ids[1]),
+            "{} lacks the model, order was {order:?}",
+            ids[1]
+        );
     }
 
     #[test]
@@ -2443,14 +2572,16 @@ mod tests {
     #[test]
     fn sticky_preferred_provider_lacking_model_does_not_win() {
         // Session stickiness must not override model support: a session pinned
-        // to tabi asking for a justwoker-only model goes to justwoker.
+        // to one provider asking for a model only the LAST provider serves goes
+        // to that provider, not back to the sticky one.
         let app = app_all_providers();
-        app.set_models_seen("tabi", vec!["claude-opus-4-8".into()]);
-        app.set_models_seen("gorouter", vec!["claude-opus-4-8".into()]);
-        app.set_models_seen("justwoker", vec!["just-new-model".into()]);
-        let order = app.provider_order_for(Some("tabi"), "just-new-model");
-        assert_eq!(order.first().unwrap(), "justwoker", "order was {order:?}");
-        assert!(!order.contains(&"tabi".to_string()));
+        let ids = pids(&app);
+        app.set_models_seen(&ids[0], vec!["test-other-model".into()]);
+        app.set_models_seen(&ids[1], vec!["test-other-model".into()]);
+        app.set_models_seen(&ids[2], vec!["test-only-model".into()]);
+        let order = app.provider_order_for(Some(&ids[0]), "test-only-model");
+        assert_eq!(order.first().unwrap(), &ids[2], "order was {order:?}");
+        assert!(!order.contains(&ids[0]), "order was {order:?}");
     }
 
     #[test]
@@ -2496,12 +2627,13 @@ mod tests {
         // `usable()` is optimistic for unprobed keys and the sweeper keeps
         // re-probing, so exclusion must be a live read of key state, not sticky.
         let app = app_all_providers();
-        let key = app.pool("justwoker")[0].clone();
+        let ids = pids(&app);
+        let key = app.pool(&ids[2])[0].clone();
         app.mark_dead(&key, 3600, "quota");
-        assert!(!app.provider_order(None).contains(&"justwoker".to_string()));
+        assert!(!app.provider_order(None).contains(&ids[2]));
         app.mark_dead(&key, 0, "revived"); // cooldown elapsed
         assert!(
-            app.provider_order(None).contains(&"justwoker".to_string()),
+            app.provider_order(None).contains(&ids[2]),
             "provider must come back once a key is usable again"
         );
     }
@@ -2511,12 +2643,13 @@ mod tests {
         // `preferred` moves a provider to the front only if it is still in the
         // ladder; stickiness must not override "this provider cannot serve".
         let app = app_all_providers();
-        for k in app.pool("justwoker") {
+        let ids = pids(&app);
+        for k in app.pool(&ids[2]) {
             app.mark_dead(&k, 3600, "quota");
         }
-        let order = app.provider_order(Some("justwoker"));
+        let order = app.provider_order(Some(&ids[2]));
         assert!(!order.is_empty());
-        assert_ne!(order.first().unwrap(), "justwoker", "order was {order:?}");
+        assert_ne!(order.first().unwrap(), &ids[2], "order was {order:?}");
     }
 
     #[test]
@@ -2524,9 +2657,11 @@ mod tests {
         // Session stickiness beats a latency win: switching &hosts mid-conversation
         // means a new key and a new account wallet.
         let app = app_all_providers();
-        app.note_latency("tabi", 5000);
-        app.note_latency("gorouter", 100);
-        assert_eq!(app.provider_order(Some("tabi")).first().unwrap(), "tabi");
+        let ids = pids(&app);
+        app.note_latency(&ids[0], 5000); // the slowest rung
+        app.note_latency(&ids[1], 100);
+        let order = app.provider_order(Some(&ids[0]));
+        assert_eq!(order.first().unwrap(), &ids[0], "order was {order:?}");
     }
 
     #[test]
@@ -2534,14 +2669,15 @@ mod tests {
         // `/v1/chat/completions` returns no `usage.cost`, so spend can only be
         // learned from the billing endpoint delta.
         let app = app_all_providers();
-        let key = app.pool("justwoker")[0].clone();
+        let ids = pids(&app);
+        let key = app.pool(&ids[2])[0].clone();
         {
             let mut g = app.lock();
             g.sessions.insert(
                 "fp-a".into(),
                 SessionState {
                     key: key.clone(),
-                    provider: "justwoker".into(),
+                    provider: ids[2].clone(),
                     last_seen: config::now_secs(),
                     ..Default::default()
                 },
@@ -2558,14 +2694,15 @@ mod tests {
         );
         assert!((g.sessions["fp-a"].cost - 2.5).abs() < 1e-9);
         assert!((g.keys[&key].spent - 2.5).abs() < 1e-9);
-        assert!((g.providers["justwoker"].cost - 2.5).abs() < 1e-9);
+        assert!((g.providers[&ids[2]].cost - 2.5).abs() < 1e-9);
     }
 
     #[test]
     fn billing_delta_ignores_a_decrease() {
         // A top-up resets total_usage; that must not read as negative spend.
         let app = app_all_providers();
-        let key = app.pool("tabi")[0].clone();
+        let ids = pids(&app);
+        let key = app.pool(&ids[0])[0].clone();
         app.set_usage(&key, 500.0);
         let before = app.lock().totals.cost;
         app.set_usage(&key, 100.0);
@@ -2575,15 +2712,16 @@ mod tests {
     #[test]
     fn response_cost_and_billing_delta_do_not_double_count() {
         let app = app_all_providers();
-        let key = app.pool("tabi")[0].clone();
+        let ids = pids(&app);
+        let key = app.pool(&ids[0])[0].clone();
         app.set_usage(&key, 0.0);
         // Anthropic path reports cost directly.
         app.record_request(
             "fp",
             "",
-            "tabi",
+            &ids[0],
             &key,
-            "claude-opus-5",
+            TEST_MODEL,
             true,
             900,
             10,
@@ -2608,53 +2746,56 @@ mod tests {
     #[test]
     fn a_fresh_streak_counts_at_full_weight() {
         let app = app_all_providers();
+        let ids = pids(&app);
         for _ in 0..3 {
-            app.note_provider_fail("tabi");
+            app.note_provider_fail(&ids[0]);
         }
-        assert!((app.effective_streak("tabi", 120) - 3.0).abs() < 1e-9);
+        assert!((app.effective_streak(&ids[0], 120) - 3.0).abs() < 1e-9);
     }
 
     #[test]
     fn an_old_streak_decays_away() {
-        // The exact live bug: gorouter held consecutive_fails=3 for 32 minutes
+        // The exact live bug: a provider held consecutive_fails=3 for 32 minutes
         // while every free uptime probe passed, so it was never selected and the
         // streak could never clear.
         let app = app_all_providers();
+        let ids = pids(&app);
         for _ in 0..3 {
-            app.note_provider_fail("gorouter");
+            app.note_provider_fail(&ids[1]);
         }
         {
             let mut g = app.lock();
-            let r = g.providers.get_mut("gorouter").unwrap();
+            let r = g.providers.get_mut(&ids[1]).unwrap();
             r.last_fail = config::now_secs() - 1915; // as observed
         }
-        let s = app.effective_streak("gorouter", 120);
+        let s = app.effective_streak(&ids[1], 120);
         assert!(s < 0.05, "streak should have decayed to nothing, got {s}");
-        let e = app.effective_error_rate("gorouter", 120);
+        let e = app.effective_error_rate(&ids[1], 120);
         assert!(e < 0.01, "error rate should have decayed, got {e}");
     }
 
     #[test]
     fn decayed_provider_is_selectable_again() {
         let app = app_all_providers();
-        app.note_latency("gorouter", 900);
-        app.note_latency("tabi", 3000);
-        app.note_latency("justwoker", 3000);
+        let ids = pids(&app);
+        app.note_latency(&ids[0], 900); // fastest, and the one that failed
+        app.note_latency(&ids[1], 3000);
+        app.note_latency(&ids[2], 3000);
         for _ in 0..3 {
-            app.note_provider_fail("gorouter");
+            app.note_provider_fail(&ids[0]);
         }
-        // Immediately after failing, gorouter must NOT be first.
-        assert_ne!(app.provider_order(None).first().unwrap(), "gorouter");
+        // Immediately after failing, ids[0] must NOT be first.
+        assert_ne!(app.provider_order(None).first().unwrap(), &ids[0]);
         // Age the failure out and clear the breaker as time would.
         {
             let mut g = app.lock();
-            let r = g.providers.get_mut("gorouter").unwrap();
+            let r = g.providers.get_mut(&ids[0]).unwrap();
             r.last_fail = config::now_secs() - 1800;
             r.open_until = 0;
         }
         assert_eq!(
             app.provider_order(None).first().unwrap(),
-            "gorouter",
+            &ids[0],
             "a provider whose failures aged out must be usable again"
         );
     }
@@ -2662,47 +2803,59 @@ mod tests {
     #[test]
     fn free_probe_heals_the_score() {
         let app = app_all_providers();
+        let ids = pids(&app);
         for _ in 0..4 {
-            app.note_provider_fail("tabi");
+            app.note_provider_fail(&ids[0]);
         }
-        assert!(app.breaker_open("tabi"));
-        app.probe_healed("tabi");
-        assert!(!app.breaker_open("tabi"));
-        assert!((app.effective_streak("tabi", 120)).abs() < 1e-9);
+        assert!(app.breaker_open(&ids[0]));
+        app.probe_healed(&ids[0]);
+        assert!(!app.breaker_open(&ids[0]));
+        assert!((app.effective_streak(&ids[0], 120)).abs() < 1e-9);
     }
 
     #[test]
     fn provider_bias_from_settings_shifts_the_order() {
         let app = app_all_providers();
-        app.note_latency("tabi", 2000);
-        app.note_latency("gorouter", 1000);
-        app.note_latency("justwoker", 3000);
-        assert_eq!(app.provider_order(None).first().unwrap(), "gorouter");
+        let ids = pids(&app);
+        app.note_latency(&ids[0], 2000);
+        app.note_latency(&ids[1], 1000);
+        app.note_latency(&ids[2], 3000);
+        assert_eq!(app.provider_order(None).first().unwrap(), &ids[1]);
         {
             let mut s = app.settings.lock().unwrap();
             s.providers
                 .iter_mut()
-                .find(|p| p.id == "tabi")
+                .find(|p| p.id == ids[0])
                 .unwrap()
                 .bias = 5.0;
         }
         assert_eq!(
             app.provider_order(None).first().unwrap(),
-            "tabi",
+            &ids[0],
             "a positive bias must be able to override latency"
         );
     }
 
     // ── error log ───────────────────────────────────────────────────────────
 
+    /// Stand-in provider label for error-log tests.
+    ///
+    /// `ErrorRecord.provider` is copied into the log line and never resolved
+    /// against `providers.json`, so these tests do not need a configured
+    /// provider — and should not pretend to have one, or they break again the
+    /// day the configured ids change.
+    const TEST_PID: &str = "test-provider";
+
     fn err_rec(class: &str, provider: &str) -> ErrorRecord {
         ErrorRecord {
             t: config::now_secs(),
             class: class.into(),
+            // Carried through to the log line verbatim, never looked up, so any
+            // label works here — including the synthetic one the callers pass.
             provider: provider.into(),
             host: "example.com".into(),
             key: "sk-abcdefghij…wxyz".into(),
-            model: "claude-opus-5".into(),
+            model: TEST_MODEL.into(),
             status: 403,
             message: "预扣费额度失败".into(),
             action: "rotated-key".into(),
@@ -2720,7 +2873,7 @@ mod tests {
         // The Events tab was empty while the dashboard reported a 25% error rate,
         // because failures were counted but never narrated.
         let app = App::new();
-        app.record_error(err_rec("QUOTA", "tabi"));
+        app.record_error(err_rec("QUOTA", TEST_PID));
         let g = app.lock();
         assert_eq!(g.errors_log.len(), 1);
         assert_eq!(g.events.len(), 1, "an error must surface in the event feed");
@@ -2732,7 +2885,7 @@ mod tests {
     fn error_log_is_a_bounded_ring_buffer() {
         let app = App::new();
         for i in 0..600 {
-            let mut r = err_rec("WAF", "gorouter");
+            let mut r = err_rec("WAF", TEST_PID);
             r.round = i;
             app.record_error(r);
         }
@@ -2745,9 +2898,9 @@ mod tests {
     #[test]
     fn recent_errors_returns_newest_first() {
         let app = App::new();
-        let mut a = err_rec("AUTH", "tabi");
+        let mut a = err_rec("AUTH", TEST_PID);
         a.round = 1;
-        let mut b = err_rec("RATE", "tabi");
+        let mut b = err_rec("RATE", TEST_PID);
         b.round = 2;
         app.record_error(a);
         app.record_error(b);
@@ -2759,7 +2912,7 @@ mod tests {
     #[test]
     fn error_record_never_holds_a_full_key() {
         let app = App::new();
-        app.record_error(err_rec("QUOTA", "tabi"));
+        app.record_error(err_rec("QUOTA", TEST_PID));
         let g = app.lock();
         let k = &g.errors_log[0].key;
         assert!(k.contains('…'), "key must be masked, got {k}");
@@ -2772,21 +2925,22 @@ mod tests {
         // The bug this fixes: a provider that answers instantly but whose MODEL
         // thinks for 55s was ranked as "slow", making the leaderboard meaningless.
         let app = app_all_providers();
+        let ids = pids(&app);
         let min = { app.settings.lock().unwrap().routing.min_samples };
         for _ in 0..min {
-            // tabi: fast to first byte, long total (thinking model)
-            app.note_latency_split("tabi", 400, 55_000);
-            // gorouter: slow to first byte, short total
-            app.note_latency_split("gorouter", 9_000, 9_500);
-            app.note_latency_split("justwoker", 9_000, 9_500);
+            // ids[0]: fast to first byte, long total (thinking model)
+            app.note_latency_split(&ids[0], 400, 55_000);
+            // the rest: slow to first byte, short total
+            app.note_latency_split(&ids[1], 9_000, 9_500);
+            app.note_latency_split(&ids[2], 9_000, 9_500);
         }
         assert_eq!(
             app.provider_order(None).first().unwrap(),
-            "tabi",
+            &ids[0],
             "must rank on TTFB, not total duration"
         );
         let g = app.lock();
-        let r = g.providers.get("tabi").unwrap();
+        let r = g.providers.get(&ids[0]).unwrap();
         assert!(r.ewma_ttfb_ms.unwrap() < 1000.0);
         assert!(
             r.ewma_ms.unwrap() > 40_000.0,
@@ -2799,17 +2953,18 @@ mod tests {
         // Below min_samples the reading is blended toward neutral, so one bad
         // measurement cannot bury a provider that has barely been tried.
         let app = app_all_providers();
-        app.note_latency_split("tabi", 20_000, 20_000); // 1 sample, terrible
+        let ids = pids(&app);
+        app.note_latency_split(&ids[0], 20_000, 20_000); // 1 sample, terrible
         let min = { app.settings.lock().unwrap().routing.min_samples };
         for _ in 0..(min + 2) {
-            app.note_latency_split("gorouter", 1_400, 1_400);
+            app.note_latency_split(&ids[1], 1_400, 1_400);
         }
         let order = app.provider_order(None);
-        assert_eq!(order.first().unwrap(), "gorouter");
-        // justwoker is entirely unmeasured and must still beat a confidently-slow
+        assert_eq!(order.first().unwrap(), &ids[1]);
+        // ids[2] is entirely unmeasured and must still beat a confidently-slow
         // provider, so exploration remains possible.
         assert!(
-            order.iter().position(|x| x == "justwoker") < order.iter().position(|x| x == "tabi"),
+            order.iter().position(|x| x == &ids[2]) < order.iter().position(|x| x == &ids[0]),
             "unmeasured should outrank confidently-slow, got {order:?}"
         );
     }
@@ -2821,21 +2976,22 @@ mod tests {
         // The leaderboard showed 0% success because one client request burning six
         // keys logged six requests AND six errors.
         let app = app_all_providers();
-        let key = app.pool("gorouter")[0].clone();
+        let ids = pids(&app);
+        let key = app.pool(&ids[1])[0].clone();
         app.note_client_request();
         // five failed attempts, then one success — ONE client request
         for _ in 0..5 {
             app.record_request(
-                "fp", "", "gorouter", &key, "m", false, 100, 10, 0, 0.0, 0, 0,
+                "fp", "", &ids[1], &key, "m", false, 100, 10, 0, 0.0, 0, 0,
             );
         }
         app.record_request(
-            "fp", "", "gorouter", &key, "m", true, 100, 10, 20, 0.01, 5, 5,
+            "fp", "", &ids[1], &key, "m", true, 100, 10, 20, 0.01, 5, 5,
         );
-        app.note_client_outcome("gorouter", true, true);
+        app.note_client_outcome(&ids[1], true, true);
 
         let g = app.lock();
-        let r = g.providers.get("gorouter").unwrap();
+        let r = g.providers.get(&ids[1]).unwrap();
         assert_eq!(r.client_requests, 1, "one client request");
         assert_eq!(r.client_failures, 0, "the user saw no failure");
         assert_eq!(r.requests, 6, "six attempts, tracked separately");
@@ -2846,12 +3002,13 @@ mod tests {
     #[test]
     fn key_rotation_is_attributed_to_its_provider() {
         let app = app_all_providers();
-        app.note_key_rotation("tabi");
-        app.note_key_rotation("tabi");
-        app.note_failover_from("tabi");
+        let ids = pids(&app);
+        app.note_key_rotation(&ids[0]);
+        app.note_key_rotation(&ids[0]);
+        app.note_failover_from(&ids[0]);
         let g = app.lock();
-        assert_eq!(g.providers.get("tabi").unwrap().key_rotations, 2);
-        assert_eq!(g.providers.get("tabi").unwrap().failovers_out, 1);
+        assert_eq!(g.providers.get(&ids[0]).unwrap().key_rotations, 2);
+        assert_eq!(g.providers.get(&ids[0]).unwrap().failovers_out, 1);
         assert_eq!(g.totals.rotations, 2);
         assert_eq!(
             g.totals.failovers, 1,
@@ -2862,19 +3019,21 @@ mod tests {
     #[test]
     fn a_rescue_credits_the_provider_that_finished_the_job() {
         let app = app_all_providers();
+        let ids = pids(&app);
         app.note_client_request();
-        app.note_failover_from("tabi");
-        app.note_client_outcome("gorouter", true, true);
+        app.note_failover_from(&ids[0]);
+        app.note_client_outcome(&ids[1], true, true);
         let g = app.lock();
-        assert_eq!(g.providers.get("gorouter").unwrap().rescues, 1);
-        assert_eq!(g.providers.get("tabi").unwrap().failovers_out, 1);
+        assert_eq!(g.providers.get(&ids[1]).unwrap().rescues, 1);
+        assert_eq!(g.providers.get(&ids[0]).unwrap().failovers_out, 1);
     }
 
     #[test]
     fn terminal_failure_counts_once_against_the_client() {
         let app = app_all_providers();
+        let ids = pids(&app);
         app.note_client_request();
-        app.note_client_outcome("tabi", false, false);
+        app.note_client_outcome(&ids[0], false, false);
         let g = app.lock();
         assert_eq!(g.totals.client_failures, 1);
         assert_eq!(g.totals.client_saved, 0);
@@ -2885,17 +3044,18 @@ mod tests {
     #[test]
     fn head_budget_grows_with_request_size() {
         // The bug: one scalar EWMA per provider, so a 281KB request and a 2.7MB
-        // request got the &identical budget. Measured direct to gorouter with a
-        // real key:
+        // request got the &identical budget. Measured direct to one provider
+        // with a real key:
         //   281KB -> TTFB 11.9s (passed on 45s)
         //   2.7MB -> TTFB 95.3s, then 99.4s on repeat (guaranteed to fail on 45s)
         // The budget must therefore be a function of THIS request's size.
         let app = app_all_providers();
+        let ids = pids(&app);
         for _ in 0..4 {
-            app.note_latency_split("tabi", 14_400, 60_000); // live EWMA was 14.4s
+            app.note_latency_split(&ids[0], 14_400, 60_000); // live EWMA was 14.4s
         }
-        let small = app.head_budget_secs("tabi", 281_305);
-        let large = app.head_budget_secs("tabi", 2_702_917);
+        let small = app.head_budget_secs(&ids[0], 281_305);
+        let large = app.head_budget_secs(&ids[0], 2_702_917);
         assert!(
             large > small,
             "big body must get a bigger budget ({small}s vs {large}s)"
@@ -2915,10 +3075,11 @@ mod tests {
         // provider bought extra wall-clock. The floor here is the measured need,
         // not the old extrapolation.
         let app = app_all_providers();
+        let ids = pids(&app);
         for _ in 0..4 {
-            app.note_latency_split("tabi", 14_400, 60_000);
+            app.note_latency_split(&ids[0], 14_400, 60_000);
         }
-        let b = app.head_budget_secs("tabi", 2_702_917);
+        let b = app.head_budget_secs(&ids[0], 2_702_917);
         assert!(
             b >= 110,
             "1M context must clear its measured ~110s need through the gateway, got {b}s"
@@ -2934,11 +3095,12 @@ mod tests {
         // The size term must not inflate ordinary turns into slow failovers:
         // a tight budget on a small body is a feature, not collateral damage.
         let app = app_all_providers();
+        let ids = pids(&app);
         for _ in 0..4 {
-            app.note_latency_split("tabi", 2_000, 8_000);
+            app.note_latency_split(&ids[0], 2_000, 8_000);
         }
         assert_eq!(
-            app.head_budget_secs("tabi", 4_096),
+            app.head_budget_secs(&ids[0], 4_096),
             config::head_min_secs(),
             "a 4KB body on a fast provider stays at the floor"
         );
@@ -2948,12 +3110,13 @@ mod tests {
     fn head_budget_is_monotonic_in_size() {
         // Guards against a sign/units slip in the size term.
         let app = app_all_providers();
+        let ids = pids(&app);
         for _ in 0..4 {
-            app.note_latency_split("gorouter", 17_600, 60_000);
+            app.note_latency_split(&ids[1], 17_600, 60_000);
         }
         let mut prev = 0u64;
         for bytes in [0u64, 100_000, 500_000, 1_000_000, 2_000_000, 3_000_000] {
-            let b = app.head_budget_secs("gorouter", bytes);
+            let b = app.head_budget_secs(&ids[1], bytes);
             assert!(
                 b >= prev,
                 "budget must not shrink as body grows ({bytes} -> {b}s)"
@@ -2967,11 +3130,12 @@ mod tests {
         // 50MB must not produce a 1000s budget: past the Cloudflare edge the
         // extra wait buys nothing and just burns the request deadline.
         let app = app_all_providers();
+        let ids = pids(&app);
         for _ in 0..4 {
-            app.note_latency_split("tabi", 14_400, 60_000);
+            app.note_latency_split(&ids[0], 14_400, 60_000);
         }
         assert_eq!(
-            app.head_budget_secs("tabi", 50 * 1024 * 1024),
+            app.head_budget_secs(&ids[0], 50 * 1024 * 1024),
             config::head_max_secs()
         );
     }
@@ -2982,8 +3146,9 @@ mod tests {
         // size term must still apply — otherwise the very first 1M request to a
         // fresh provider repeats the original bug.
         let app = app_all_providers();
-        let cold_small = app.head_budget_secs("justwoker", 0);
-        let cold_large = app.head_budget_secs("justwoker", 2_702_917);
+        let ids = pids(&app);
+        let cold_small = app.head_budget_secs(&ids[2], 0);
+        let cold_large = app.head_budget_secs(&ids[2], 2_702_917);
         assert_eq!(cold_small, config::head_default_secs());
         assert!(cold_large > cold_small, "{cold_small}s vs {cold_large}s");
     }
@@ -2994,18 +3159,19 @@ mod tests {
         // A fixed timeout is wrong for one end or the other, so the budget
         // must track the provider's own measurements.
         let app = app_all_providers();
+        let ids = pids(&app);
         assert_eq!(
-            app.head_budget_secs("tabi", 0),
+            app.head_budget_secs(&ids[0], 0),
             config::head_default_secs(),
             "unmeasured provider gets the generous default"
         );
         // One sample is not policy: still default.
-        app.note_latency_split("tabi", 2000, 2000);
-        assert_eq!(app.head_budget_secs("tabi", 0), config::head_default_secs());
+        app.note_latency_split(&ids[0], 2000, 2000);
+        assert_eq!(app.head_budget_secs(&ids[0], 0), config::head_default_secs());
         // Two samples: 3x EWMA of ~2s = ~6s, clamped up to the floor.
-        app.note_latency_split("tabi", 2000, 2000);
+        app.note_latency_split(&ids[0], 2000, 2000);
         assert_eq!(
-            app.head_budget_secs("tabi", 0),
+            app.head_budget_secs(&ids[0], 0),
             config::head_min_secs(),
             "fast provider fails over fast"
         );
@@ -3014,11 +3180,12 @@ mod tests {
     #[test]
     fn head_budget_gives_slow_provider_room_but_never_past_the_edge() {
         let app = app_all_providers();
+        let ids = pids(&app);
         // Simulate the live 63-80s TTFB measurements.
         for _ in 0..6 {
-            app.note_latency_split("gorouter", 70_000, 300_000);
+            app.note_latency_split(&ids[1], 70_000, 300_000);
         }
-        let b = app.head_budget_secs("gorouter", 0);
+        let b = app.head_budget_secs(&ids[1], 0);
         // 3x of ~70s = ~210s, capped at the edge ceiling. Asserted against
         // `head_max_secs()` rather than a literal so raising the ceiling (130 ->
         // 170 when 1M measurements landed) does not silently invalidate it.
@@ -3034,14 +3201,15 @@ mod tests {
         // EWMA must pull the budget back down when the provider gets fast
         // again, otherwise one bad hour inflates every future budget.
         let app = app_all_providers();
+        let ids = pids(&app);
         for _ in 0..6 {
-            app.note_latency_split("tabi", 60_000, 200_000);
+            app.note_latency_split(&ids[0], 60_000, 200_000);
         }
-        let slow = app.head_budget_secs("tabi", 0);
+        let slow = app.head_budget_secs(&ids[0], 0);
         for _ in 0..10 {
-            app.note_latency_split("tabi", 3_000, 10_000);
+            app.note_latency_split(&ids[0], 3_000, 10_000);
         }
-        let fast = app.head_budget_secs("tabi", 0);
+        let fast = app.head_budget_secs(&ids[0], 0);
         assert!(
             fast < slow,
             "budget must shrink as TTFB recovers ({slow} -> {fast})"
@@ -3051,11 +3219,16 @@ mod tests {
     #[test]
     fn observed_hold_overrides_configured_default() {
         let app = app_all_providers();
-        assert!((app.hold_for("tabi", "claude-opus-5") - 0.80).abs() < 1e-9);
-        app.learn_hold("tabi", "claude-opus-5", 2.4);
-        assert!((app.hold_for("tabi", "claude-opus-5") - 2.4).abs() < 1e-9);
+        let ids = pids(&app);
+        // Asserted against the CONFIGURED hold, not a literal 0.80: the default
+        // hold is per-provider policy in providers.json and legitimately differs
+        // between deployments. Only the override behaviour is under test here.
+        let base = app.hold_for(&ids[0], TEST_MODEL);
+        assert!((app.hold_for(&ids[0], TEST_MODEL) - base).abs() < 1e-9);
+        app.learn_hold(&ids[0], TEST_MODEL, base + 2.4);
+        assert!((app.hold_for(&ids[0], TEST_MODEL) - (base + 2.4)).abs() < 1e-9);
         // Never below the configured floor.
-        app.learn_hold("tabi", "claude-opus-5", 0.1);
-        assert!((app.hold_for("tabi", "claude-opus-5") - 2.4).abs() < 1e-9);
+        app.learn_hold(&ids[0], TEST_MODEL, base * 0.1);
+        assert!((app.hold_for(&ids[0], TEST_MODEL) - (base + 2.4)).abs() < 1e-9);
     }
 }

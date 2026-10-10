@@ -155,6 +155,26 @@ pub fn key_prefix() -> String {
     std::env::var("KEYFORGE_KEY_PREFIX").unwrap_or_else(|_| KEY_PREFIX.into())
 }
 
+  /// Accepted key prefixes. `KEYFORGE_KEY_PREFIXES` is a comma-separated list;
+  /// a single `KEYFORGE_KEY_PREFIX` still works. Defaults to `[KEY_PREFIX]`.
+  ///
+  /// Resellers and self-hosted gateways do not all mint `sk-` keys -- `sk_live_`,
+  /// `cc_` and similar are common -- so the accepted set has to be configurable
+  /// per deployment rather than hardcoded at the call site.
+  pub fn key_prefixes() -> Vec<String> {
+      if let Ok(list) = std::env::var("KEYFORGE_KEY_PREFIXES") {
+          let parts: Vec<String> = list
+              .split(',')
+              .map(|p| p.trim().to_string())
+              .filter(|p| !p.is_empty())
+              .collect();
+          if !parts.is_empty() {
+              return parts;
+          }
+      }
+      vec![key_prefix()]
+  }
+
 pub fn key_min_len() -> usize {
     env_u64("KEYFORGE_KEY_MIN_LEN", KEY_MIN_LEN as u64) as usize
 }

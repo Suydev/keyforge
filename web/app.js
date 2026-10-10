@@ -180,8 +180,37 @@ const ICON = {
   info: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>',
 };
 
-const PROVIDER_COLOR = { tabi: '#38bdf8', gorouter: '#a78bfa' };
-const colorFor = (id) => PROVIDER_COLOR[id] || '#22c55e';
+/* Provider accent colour.
+ *
+ * This used to be a literal `{ tabi: …, gorouter: … }` map, so on any provider
+ * set other than the two it was written for EVERY badge fell through to the
+ * same green — three providers indistinguishable on the leaderboard, which is
+ * the one job these colours have. providers.json is user-editable, so the map
+ * was wrong the moment anyone added or renamed a provider.
+ *
+ * Now the hue is derived from the id itself: stable for a given provider across
+ * reloads, distinct between providers, and correct for any id that has never
+ * been seen before. Saturation/lightness are fixed so every result stays legible
+ * against both the dark and light surfaces.
+ */
+const PROVIDER_HUES = [198, 262, 32, 152, 340, 12, 214];
+const hueFor = (id) => {
+  let h = 0;
+  for (const ch of String(id)) h = (h * 31 + ch.codePointAt(0)) >>> 0;
+  return PROVIDER_HUES[h % PROVIDER_HUES.length];
+};
+const colorFor = (id) => `hsl(${hueFor(id)} 72% 62%)`;
+
+/* Provider badge. The hue arrives as a `--ph` custom property rather than
+ * through a `.badge.<id>` CSS rule — such a rule can only exist for ids someone
+ * hardcoded at build time, which is exactly the coupling this replaced. Only the
+ * hue is set here; saturation and lightness stay in CSS so the light theme can
+ * darken it for contrast on white. */
+const providerBadge = (id, text) => {
+  const b = el('span', 'badge badge-provider', text);
+  b.style.setProperty('--ph', String(hueFor(id)));
+  return b;
+};
 
 /* ══ DISPLAY SETTINGS ══════════════════════════════════════════════════════
  * Persisted to localStorage and applied as data-attributes on <html>, which is
@@ -288,6 +317,9 @@ const state = {
   keyProvider: null,
   keysCache: {},
   modelSort: { col: 'requests', dir: 'desc' },
+  // Sessions page: column sort and the client-side filters.
+  sessionSort: { col: 'lastSeen', dir: 'desc' },
+  sessionFilter: { client: '', provider: '', errors: false, q: '' },
   lastErrorCount: 0,
   lastOffline: false,
   seenFirst: false,
@@ -563,11 +595,14 @@ document.addEventListener('visibilitychange', () => {
     // The 1s ticker is pointless behind a hidden tab and browsers throttle it
     // anyway; stopping it explicitly keeps the idle cost at actually zero.
     stopTicker();
+    stopSessionRefresh();
     setConn('paused', 'Paused (tab hidden)');
   } else {
     state.retry = 0;
     connect();
     startTicker();
+    // Self-guards on `sdFp`, so a no-op when no drawer is open.
+    startSessionRefresh();
     // Repaint at once: the frozen durations are now badly out of date.
     tickLive();
   }
@@ -958,7 +993,21 @@ function renderLive(s) {
     rows,
     (f) => f.id,
     (f) => {
-      const tr = el('tr', 'is-live');
+      const tr = el('tr', 'is-live clickable');
+      // The obvious follow-up to "a request is in flight" is "which conversation
+      // is that", and the answer — `f.session`, the fingerprint — is already on
+      // the row. Same keyboard contract as the Sessions table, so the drawer is
+      // reachable without a mouse from either page.
+      if (f.session) {
+        tr.tabIndex = 0;
+        tr.setAttribute('role', 'button');
+        tr.title = f.session;
+        const open = () => openSession(f.session);
+        tr.addEventListener('click', open);
+        tr.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); }
+        });
+      }
       cells(tr, [
         { f: 'label', cls: 'mono' },
         { f: 'client' },
@@ -1001,7 +1050,7 @@ function renderLive(s) {
       if (tdp && tdp.dataset.p !== (f.provider || '')) {
         tdp.dataset.p = f.provider || '';
         tdp.innerHTML = '';
-        if (f.provider) tdp.appendChild(el('span', 'badge ' + f.provider, f.provider));
+        if (f.provider) tdp.appendChild(providerBadge(f.provider, f.provider));
         else setText(tdp, '—');
       }
 
@@ -1060,7 +1109,7 @@ function renderProviderCards(s) {
     (p) => {
       const card = el('div', 'card spot');
       const h = el('h3');
-      h.appendChild(el('span', 'badge ' + p.id, p.label));
+      h.appendChild(providerBadge(p.id, p.label));
       h.appendChild(el('span', 'hint', p.host));
       card.appendChild(h);
 
@@ -1244,7 +1293,7 @@ function renderProviders(s) {
       if (name.dataset.s !== p.id) {
         name.dataset.s = p.id;
         name.innerHTML = '';
-        name.appendChild(el('span', 'badge ' + p.id, p.label));
+        name.appendChild(providerBadge(p.id, p.label));
       }
       patchCells(tr, {
         host: p.host,
@@ -1312,7 +1361,7 @@ function renderModels(s) {
         tdp.dataset.s = key;
         tdp.innerHTML = '';
         for (const [pid, n] of Object.entries(m.byProvider || {})) {
-          tdp.appendChild(el('span', 'badge ' + pid, `${pid} ${fmtInt(n)}`));
+          tdp.appendChild(providerBadge(pid, `${pid} ${fmtInt(n)}`));
           tdp.appendChild(document.createTextNode(' '));
         }
         if (!key) setText(tdp, '—');
@@ -1330,7 +1379,7 @@ function renderModels(s) {
       adv.innerHTML = '<div class="empty">No models discovered yet — the fast model sync probes every few seconds.</div>';
     } else {
       rows.forEach((m) => {
-        const badge = el('span', 'badge ' + (m.provider || ''), m.id);
+        const badge = providerBadge(m.provider || '', m.id);
         adv.appendChild(badge);
         adv.appendChild(document.createTextNode(' '));
       });
@@ -1382,15 +1431,55 @@ function initModelSort() {
   });
 }
 
+/* ── sessions page ────────────────────────────────────────────────────────── */
+
+/* The snapshot carries only the newest SNAPSHOT_SESSIONS sessions, so this page
+ * filters and sorts what arrived rather than paging: there is no list endpoint
+ * to page, and pretending otherwise would be a lie in the UI. A session older
+ * than the cap is still reachable — the lookup box asks /api/session for it by
+ * name, which is the one endpoint that takes a fingerprint. */
+
+/** Sort keys, derived where the payload has no single field for the column. */
+const SESSION_SORT = {
+  session: (x) => (x.label || x.fp || '').toLowerCase(),
+  provider: (x) => x.provider || '',
+  turns: (x) => x.turns || 0,
+  cost: (x) => x.cost || 0,
+  inTokens: (x) => x.inTokens || 0,
+  outTokens: (x) => x.outTokens || 0,
+  bytes: (x) => (x.bytesUp || 0) + (x.bytesDown || 0),
+  errors: (x) => x.errors || 0,
+  maxLatencyMs: (x) => x.maxLatencyMs || 0,
+  models: (x) => Object.keys(x.models || {}).sort()[0] || '',
+  lastSeen: (x) => x.lastSeen || 0,
+};
+
+/** Columns whose values are names, so "ascending" must mean A→Z, not 1→0. */
+const SESSION_TEXT_COLS = new Set(['session', 'provider', 'models']);
+
 function renderSessions(s) {
   const tb = $('#sessionTable tbody');
-  $('#sessionEmpty').hidden = s.sessions.length > 0;
+  const all = s.sessions || [];
+  const total = s.sessionsTotal ?? all.length;
+
+  // Chips first: their counts come from the unfiltered set.
+  renderSessionChips(all);
+  const rows = sortSessions(all.filter(sessionMatches));
+
+  // Two different empties. "The gateway has never seen a session" and "your
+  // filter hid everything" are different statements, and conflating them makes
+  // a healthy dashboard read as broken.
+  const empty = $('#sessionEmpty');
+  if (empty) empty.hidden = all.length > 0;
+  const noMatch = $('#sessionNoMatch');
+  if (noMatch) noMatch.hidden = rows.length > 0 || all.length === 0;
+  setText($('#sessionNote'), sessionCapNote(all.length, total));
 
   // Keyed on the session fingerprint. Rebuilding here destroyed the row that a
   // keyboard user had focused, and reset the working-dot animation on every push.
   reconcile(
     tb,
-    s.sessions,
+    rows,
     (x) => x.fp,
     (x) => {
       const tr = el('tr', 'clickable');
@@ -1408,19 +1497,28 @@ function renderSessions(s) {
         { f: 'session' }, { f: 'provider' }, { f: 'key', cls: 'mono' },
         { f: 'turns', cls: 'num' }, { f: 'cost', cls: 'num' },
         { f: 'in', cls: 'num' }, { f: 'out', cls: 'num' },
-        { f: 'data', cls: 'num' }, { f: 'models', cls: 'mono' }, { f: 'ago' },
+        { f: 'data', cls: 'num' }, { f: 'errors', cls: 'num' },
+        { f: 'slowest', cls: 'num' }, { f: 'models', cls: 'mono' }, { f: 'ago' },
       ]);
+      // The session cell is two nodes on purpose. `.sess-id` holds the badge and
+      // the working dot and is rebuilt only when that state changes (rebuilding
+      // it restarts the pulse); `.sess-meta` is a plain line of counters that is
+      // patched every push. Folding them together would replay the pulse on
+      // every push, which is the exact bug this table used to have.
+      const td0 = tr.querySelector('[data-f="session"]');
+      td0.appendChild(el('span', 'sess-id'));
+      td0.appendChild(el('span', 'sess-meta'));
       return tr;
     },
     (tr, x) => {
       // Session cell carries an SVG badge and, when working, a pulsing dot.
       // Rebuild only when that state changes, or the pulse restarts every push.
-      const td0 = tr.querySelector('[data-f="session"]');
+      const id = tr.querySelector('.sess-id');
       const sstate = `${x.working ? 'w' : x.active ? 'a' : 'i'}:${x.label || x.fp}`;
-      if (td0.dataset.s !== sstate) {
-        td0.dataset.s = sstate;
-        td0.innerHTML = '';
-        td0.appendChild(badgeWith(
+      if (id.dataset.s !== sstate) {
+        id.dataset.s = sstate;
+        id.innerHTML = '';
+        id.appendChild(badgeWith(
           x.working ? 'ok' : '',
           x.working ? ICON.check : ICON.info,
           x.label || x.fp.slice(0, 10),
@@ -1429,15 +1527,19 @@ function renderSessions(s) {
           const ph = el('span', 'phase');
           ph.appendChild(el('span', 'live-dot'));
           ph.appendChild(el('span', null, 'working'));
-          td0.appendChild(ph);
+          id.appendChild(ph);
         }
       }
+      // The full fingerprint is in the title rather than the cell: the cell shows
+      // the human label, and the label is not unique but the fingerprint is.
+      tr.title = x.fp;
+      setText(tr.querySelector('.sess-meta'), sessionMeta(x));
 
       const tdp = tr.querySelector('[data-f="provider"]');
       if (tdp.dataset.s !== x.provider) {
         tdp.dataset.s = x.provider;
         tdp.innerHTML = '';
-        tdp.appendChild(el('span', 'badge ' + x.provider, x.provider));
+        tdp.appendChild(providerBadge(x.provider, x.provider));
       }
 
       patchCells(tr, {
@@ -1447,8 +1549,19 @@ function renderSessions(s) {
         in: fmtInt(x.inTokens),
         out: fmtInt(x.outTokens),
         data: fmtBytes(x.bytesUp + x.bytesDown),
-        models: Object.keys(x.models || {}).join(', ') || '—',
+        errors: fmtInt(x.errors),
+        slowest: x.maxLatencyMs ? `${fmtInt(x.maxLatencyMs)} ms` : '—',
+        models: sessionModels(x.models),
       });
+
+      // Colour is an accent here, never the message: the count itself is shown,
+      // and a failure in this table does not mean the request failed.
+      const tde = tr.querySelector('[data-f="errors"]');
+      setClass(tde, 'bad', x.errors > 0);
+      tde.title = x.errors > 0
+        ? 'failed upstream attempts — the gateway retried these'
+        : '';
+      tr.querySelector('[data-f="slowest"]').title = 'slowest single turn in this session';
 
       // data-ago hands this cell to the 1s ticker, so "4m ago" keeps counting
       // even when no push arrives.
@@ -1460,6 +1573,183 @@ function renderSessions(s) {
       setClass(tr, 'is-live', !!x.working);
     },
   );
+}
+
+/**
+ * The quiet second line under a session name: which tool it is, and the two
+ * counters that explain why a session is bigger than its turn count suggests.
+ *
+ * Both counters are in the snapshot but were never rendered anywhere. They are
+ * omitted when zero so the common case stays one line tall.
+ */
+function sessionMeta(x) {
+  const bits = [];
+  if (x.clientLabel && x.clientLabel !== 'unknown') bits.push(x.clientLabel);
+  if (x.api) bits.push(`${x.api} API`);
+  if (x.compactions) bits.push(`${fmtInt(x.compactions)} compaction${x.compactions > 1 ? 's' : ''}`);
+  if (x.keySwitches) bits.push(`${fmtInt(x.keySwitches)} key switch${x.keySwitches > 1 ? 'es' : ''}`);
+  return bits.join(' · ');
+}
+
+/**
+ * Models as `name xN`, busiest first.
+ *
+ * The bare joined names the table used to render hid the only interesting part
+ * of a long session: which model did the work. The secondary sort makes the
+ * string stable between pushes, so the cell can be patched as plain text rather
+ * than rebuilt.
+ */
+const sessionModels = (m) =>
+  Object.entries(m || {})
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([id, n]) => `${id} x${fmtInt(n)}`)
+    .join(', ') || '—';
+
+/**
+ * Does one session survive the current filters?
+ *
+ * Every identifying field is checked, not just the label: someone looking for a
+ * session knows the client it came from, or the model it used, or the tail of
+ * the key — almost never the fingerprint the column actually displays.
+ */
+function sessionMatches(x) {
+  const f = state.sessionFilter;
+  if (f.client && x.clientLabel !== f.client) return false;
+  if (f.provider && x.provider !== f.provider) return false;
+  if (f.errors && !(x.errors > 0)) return false;
+  if (!f.q) return true;
+  const hay = [
+    x.label, x.fp, x.client, x.clientLabel, x.api, x.provider, x.key, x.via,
+    ...Object.keys(x.models || {}),
+  ];
+  return hay.some((v) => v && String(v).toLowerCase().includes(f.q));
+}
+
+/** Same comparator as the Models table: names compare as text, the rest as numbers. */
+function sortSessions(rows) {
+  const { col, dir } = state.sessionSort;
+  const key = SESSION_SORT[col] || SESSION_SORT.lastSeen;
+  return rows.sort((a, b) => {
+    const x = key(a), y = key(b);
+    const c = typeof x === 'string' ? x.localeCompare(y) : (x ?? 0) - (y ?? 0);
+    return dir === 'asc' ? c : -c;
+  });
+}
+
+/**
+ * Say what is NOT on screen, in words.
+ *
+ * `sessionsTotal` counts every session the gateway tracks while the snapshot
+ * carries only the newest SNAPSHOT_SESSIONS of them. Showing the count without
+ * saying so is the failure mode here: a total that disagrees with the row count
+ * reads as a bug unless the cap is named.
+ */
+function sessionCapNote(shown, total) {
+  if (total <= shown) return `Showing all ${fmtInt(total)} tracked session${total === 1 ? '' : 's'}.`;
+  return `Showing the ${fmtInt(shown)} most recent of ${fmtInt(total)} tracked sessions. ` +
+    `Older ones are not in the live feed — paste a session id above to open one.`;
+}
+
+/**
+ * Filter chips, mirroring the Errors tab.
+ *
+ * Rebuilt only when the chip SET changes, which the Errors tab does not do. That
+ * matters more here because the Sessions table repaints on every push while the
+ * Errors tab's data changes with it: clearing the box each time would steal
+ * focus from a chip mid-interaction, several times a second.
+ */
+function renderSessionChips(all) {
+  const fw = $('#sessionFilter');
+  if (!fw) return;
+  const clients = [...new Set(all.map((x) => x.clientLabel).filter(Boolean))].sort();
+  const providers = [...new Set(all.map((x) => x.provider).filter(Boolean))].sort();
+  const nErr = all.filter((x) => x.errors > 0).length;
+
+  const key = `${clients.join('|')}#${providers.join('|')}#${nErr}`;
+  if (fw.dataset.k === key) return;
+  fw.dataset.k = key;
+  fw.innerHTML = '';
+
+  const f = state.sessionFilter;
+  const mk = (label, patch, pressed) => {
+    const b = el('button', 'btn ghost', label);
+    b.type = 'button';
+    b.setAttribute('aria-pressed', String(pressed));
+    b.addEventListener('click', () => {
+      Object.assign(state.sessionFilter, patch);
+      renderSessions(state.snap);
+    });
+    fw.appendChild(b);
+  };
+  const anyFilter = () => f.client || f.provider || f.errors || f.q;
+  mk(`All (${fmtInt(all.length)})`, { client: '', provider: '', errors: false }, !anyFilter());
+  for (const c of clients) mk(`Client: ${c}`, { client: c }, f.client === c);
+  for (const p of providers) mk(`Provider: ${p}`, { provider: p }, f.provider === p);
+  if (nErr) mk(`Errors (${nErr})`, { errors: true }, !!f.errors);
+}
+
+/** Back to unfiltered, from either the All chip or the empty-state button. */
+function resetSessionFilter() {
+  state.sessionFilter = { client: '', provider: '', errors: false, q: '' };
+  // The input is the only other source of `q`, so it has to be cleared with it —
+  // otherwise the box and the table disagree about what is being searched.
+  const box = $('#sessionSearch');
+  if (box) box.value = '';
+  renderSessions(state.snap);
+}
+
+function initSessionSort() {
+  $$('#sessionTable thead th[data-sort]').forEach((th) => {
+    th.style.cursor = 'pointer';
+    th.tabIndex = 0;
+    const go = () => {
+      const col = th.dataset.sort;
+      if (state.sessionSort.col === col) {
+        state.sessionSort.dir = state.sessionSort.dir === 'asc' ? 'desc' : 'asc';
+      } else {
+        // First tap on a name column is A→Z; on a count column it is biggest
+        // first. Starting every column descending made the name columns read as
+        // reverse-alphabetical.
+        state.sessionSort = { col, dir: SESSION_TEXT_COLS.has(col) ? 'asc' : 'desc' };
+      }
+      // aria-sort must reflect the live sort state (WCAG).
+      $$('#sessionTable thead th[data-sort]').forEach((o) => o.setAttribute('aria-sort', 'none'));
+      th.setAttribute('aria-sort', state.sessionSort.dir === 'asc' ? 'ascending' : 'descending');
+      renderSessions(state.snap);
+    };
+    th.addEventListener('click', go);
+    th.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        go();
+      }
+    });
+  });
+}
+
+function initSessionControls() {
+  const box = $('#sessionSearch');
+  // 24 rows re-sorted is nothing, so this filters as you type with no debounce;
+  // a delay here would just make the box feel broken.
+  box?.addEventListener('input', () => {
+    state.sessionFilter.q = box.value.trim().toLowerCase();
+    renderSessions(state.snap);
+  });
+  $('#sessionClear')?.addEventListener('click', resetSessionFilter);
+
+  // Exact lookup. It does not fetch anything itself: openSession already calls
+  // /api/session for one fingerprint and is the single place that endpoint is
+  // used, so a second caller would be a second copy of the same fetch.
+  const fp = $('#sessionFp');
+  const go = () => {
+    const raw = (fp?.value || '').trim();
+    if (raw) openSession(raw);
+    else fp?.focus();
+  };
+  $('#sessionLookup')?.addEventListener('click', go);
+  fp?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); go(); }
+  });
 }
 
 function renderTraffic(s) {
@@ -1491,7 +1781,7 @@ function renderTraffic(s) {
       if (name.dataset.s !== p.id) {
         name.dataset.s = p.id;
         name.innerHTML = '';
-        name.appendChild(el('span', 'badge ' + p.id, p.label));
+        name.appendChild(providerBadge(p.id, p.label));
       }
       const sum = p.bytesUp + p.bytesDown;
       patchCells(tr, {
@@ -1627,11 +1917,15 @@ function initKeyForm() {
   });
 
   // Validate on blur, not on keystroke (skill: inline-validation).
+  // No prefix assumption: providers issue keys in many shapes (`sk-`, `sk-ant-`,
+  // `AIza`, JWTs, bare hex), so the only thing a browser can honestly check is
+  // that something non-empty was pasted. Rejecting on shape just locks people
+  // out of providers that work perfectly well.
   input.addEventListener('blur', () => {
     const v = input.value.trim();
-    if (v && !v.startsWith('sk-')) {
-      showResult('bad', 'That does not look like an API key', [
-        ['Expected', 'a value beginning with sk-'],
+    if (v && /\s/.test(v)) {
+      showResult('bad', 'That looks like more than one value', [
+        ['Expected', 'a single key with no spaces'],
         ['Got', v.slice(0, 12) + '…'],
       ]);
     }
@@ -1642,14 +1936,14 @@ function initKeyForm() {
     const key = input.value.trim();
 
     if (!key) {
-      showResult('bad', 'Enter a key first', [['Fix', 'paste a key beginning with sk-']]);
+      showResult('bad', 'Enter a key first', [['Fix', 'paste the key exactly as the provider issued it']]);
       input.focus(); // focus the invalid field (skill: focus-management)
       return;
     }
-    if (!key.startsWith('sk-') || key.length < 20) {
-      showResult('bad', 'Not a valid key format', [
-        ['Cause', 'keys start with sk- and are at least 20 characters'],
-        ['Fix', 'check for a truncated copy/paste'],
+    if (/\s/.test(key)) {
+      showResult('bad', 'That looks like more than one value', [
+        ['Cause', 'the key contains whitespace'],
+        ['Fix', 'check for a truncated or doubled copy/paste'],
       ]);
       input.focus();
       return;
@@ -1856,7 +2150,7 @@ function renderErrors(s) {
       if (tdp.dataset.s !== e.provider) {
         tdp.dataset.s = e.provider;
         tdp.innerHTML = '';
-        tdp.appendChild(el('span', 'badge ' + e.provider, e.provider));
+        tdp.appendChild(providerBadge(e.provider, e.provider));
       }
 
       patchCells(tr, {
@@ -2031,10 +2325,10 @@ async function renderSettings() {
       </div>
       <div class="sp-models">
         <label>models (comma-separated, auto-filled from /v1/models)
-          <input class="sp-in" data-k="models" value="${esc((p.models || []).join(', '))}" placeholder="claude-opus-5, claude-sonnet-4-20250514">
+          <input class="sp-in" data-k="models" value="${esc((p.models || []).join(', '))}" placeholder="${esc((p.models || []).slice(0, 2).join(', ') || 'model-a, model-b')}">
         </label>
         <label>model map (client → upstream, comma-separated key=value)
-          <input class="sp-in" data-k="model_map" value="${esc(Object.entries(p.model_map || {}).map(([k,v]) => `${k}=${v}`).join(', '))}" placeholder="claude-opus-5=tabi/claude-opus-5">
+          <input class="sp-in" data-k="model_map" value="${esc(Object.entries(p.model_map || {}).map(([k,v]) => `${k}=${v}`).join(', '))}" placeholder="claude-opus-5=${esc(p.id)}/claude-opus-5">
         </label>
       </div>
       <div class="sp-hosts">${(p.hosts || []).map((h, j) => `
@@ -2278,7 +2572,7 @@ function paintLeaderboard(d) {
       if (tdp.dataset.s !== pstate) {
         tdp.dataset.s = pstate;
         tdp.innerHTML = '';
-        tdp.appendChild(el('span', 'badge ' + p.id, p.label));
+        tdp.appendChild(providerBadge(p.id, p.label));
         if (p.breakerOpen) tdp.appendChild(badgeWith('bad', ICON.warn, 'circuit open'));
       }
 
@@ -2336,31 +2630,124 @@ function paintLeaderboard(d) {
 
 let sdLastFocus = null;
 
-async function openSession(fp) {
-  sdLastFocus = document.activeElement;
+/* ── session detail drawer ───────────────────────────────────────────────── */
+
+let sdLastFocus = null;
+/** Fingerprint on screen, so the refresh timer has something to re-fetch. */
+let sdFp = null;
+/** Monotonic token: only the newest open or reload may paint the drawer. */
+let sdSeq = 0;
+/** How often an open drawer re-reads the session. */
+const SD_REFRESH_MS = 10000;
+let sdTimer = null;
+
+function openSession(fp) {
+  if (!fp) return;
   const drawer = $('#sdDrawer');
   const backdrop = $('#sdBackdrop');
+  // Focus is captured only on the first open. The auto-refresh repaints in
+  // place, and re-running this would pull focus out of whatever the reader is
+  // actually looking at inside the drawer.
+  if (drawer.hidden) sdLastFocus = document.activeElement;
+  sdFp = fp;
   drawer.hidden = false;
   backdrop.hidden = false;
   $('#sdBody').innerHTML = '<div class="empty">Loading…</div>';
   $('#sdClose').focus(); // move focus into the dialog (WCAG)
+  loadSession(fp, ++sdSeq);
+  startSessionRefresh();
+}
 
+/**
+ * Fetch one session and paint it.
+ *
+ * `seq` is checked before every write to the DOM. The drawer can be reopened,
+ * refreshed or closed while a request is in flight, and a slow response for the
+ * previous session must never replace what is on screen now — the symptom of
+ * that bug is a drawer showing one session's title over another's numbers.
+ *
+ * Returns true when the session was found, so the not-found path can stop the
+ * refresh timer instead of polling a fingerprint that does not exist.
+ */
+async function loadSession(fp, seq) {
   let d;
   try {
-    const r = await fetch('/api/session?fp=' + encodeURIComponent(fp));
+    const r = await fetch('/api/session?fp=' + encodeURIComponent(fp), {
+      headers: { accept: 'application/json' },
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
     d = await r.json();
   } catch (e) {
+    if (seq !== sdSeq) return false;
     $('#sdBody').innerHTML = '';
     $('#sdBody').appendChild(el('div', 'empty', 'Could not load: ' + e.message));
-    return;
+    stopSessionRefresh();
+    return false;
   }
+  if (seq !== sdSeq) return false;
   if (d.error) {
-    $('#sdBody').innerHTML = '';
-    $('#sdBody').appendChild(el('div', 'empty', d.error));
-    return;
+    const body = $('#sdBody');
+    body.innerHTML = '';
+    const box = el('div', 'empty');
+    box.appendChild(el('div', null, `${d.error} — “${fp}”`));
+    box.appendChild(el('div', null,
+      'A session id is either a client-supplied one (sid:…) or a 16-character hash of the ' +
+      'opening message. The table above only lists the newest sessions, so an older one has ' +
+      'to be opened by its exact id.'));
+    body.appendChild(box);
+    stopSessionRefresh();
+    return false;
+  }
+  paintSession(d);
+  return true;
+}
+
+/**
+ * Keep an open drawer current.
+ *
+ * A long-lived session is not finished when you open it, and the snapshot's row
+ * and the drawer's detail were computed at different moments — leaving the
+ * drawer to fetch once meant watching cost and turn count drift away from the
+ * table behind it. Follows the same rule as the live ticker: nothing runs while
+ * the tab is hidden.
+ */
+function startSessionRefresh() {
+  stopSessionRefresh();
+  if (!sdFp || document.hidden) return;
+  sdTimer = setInterval(() => {
+    if (document.hidden || $('#sdDrawer').hidden || !sdFp) {
+      stopSessionRefresh();
+      return;
+    }
+    loadSession(sdFp, ++sdSeq);
+  }, SD_REFRESH_MS);
+}
+
+function stopSessionRefresh() {
+  clearInterval(sdTimer);
+  sdTimer = null;
+}
+
+/**
+ * Write a loaded session into the drawer.
+ *
+ * Split out from the fetch so a refresh can repaint without re-entering the
+ * loading state, and so the scroll position survives: a long failure list that
+ * jumped back to the top every 10 seconds would be unreadable.
+ */
+function paintSession(d) {
+  $('#sdTitle').textContent = d.label || d.fp.slice(0, 16);
+  const at = Math.floor(Date.now() / 1000);
+  const fresh = $('#sdFreshAt');
+  if (fresh) {
+    // data-ago hands this to the 1s ticker, so the age keeps counting between
+    // refreshes without the drawer repainting.
+    fresh.dataset.ago = String(at);
+    setText(fresh, fmtAgo(at));
   }
 
-  $('#sdTitle').textContent = d.label || d.fp.slice(0, 16);
+  const drawer = $('#sdDrawer');
+  const scroll = drawer.scrollTop;
   const body = $('#sdBody');
   body.innerHTML = '';
 
@@ -2369,7 +2756,7 @@ async function openSession(fp) {
   if (d.working) status.appendChild(badgeWith('ok', ICON.check, 'working now'));
   else if (d.active) status.appendChild(badgeWith('', ICON.info, 'active'));
   else status.appendChild(badgeWith('', ICON.info, `idle ${fmtDuration(d.idleSecs)}`));
-  status.appendChild(el('span', 'badge ' + d.provider, d.provider));
+  status.appendChild(providerBadge(d.provider, d.provider));
   if (d.clientLabel) status.appendChild(el('span', 'badge', d.clientLabel));
   if (d.api) status.appendChild(el('span', 'badge', d.api + ' API'));
   body.appendChild(status);
@@ -2441,11 +2828,19 @@ async function openSession(fp) {
     wrap.appendChild(tbl);
     body.appendChild(wrap);
   }
+
+  // Repainted in place: restoring the offset is what makes the auto-refresh
+  // usable on a long session instead of a 10s jump to the top.
+  drawer.scrollTop = scroll;
 }
 
 function closeSession() {
   $('#sdDrawer').hidden = true;
   $('#sdBackdrop').hidden = true;
+  stopSessionRefresh();
+  sdFp = null;
+  // Bump the token so a request already in flight cannot repaint a closed drawer.
+  sdSeq++;
   // Restore focus to whatever opened the drawer (WCAG focus management).
   if (sdLastFocus && sdLastFocus.isConnected) sdLastFocus.focus();
 }
@@ -2704,6 +3099,8 @@ function boot() {
   initCharts();
   initTabs();
   initModelSort();
+  initSessionSort();
+  initSessionControls();
   initKeyForm();
   initProviderForm();
   initSound();

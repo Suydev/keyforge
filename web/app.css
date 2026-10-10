@@ -47,10 +47,12 @@
   --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.3);
   --shadow-2: 0 10px 30px rgba(0, 0, 0, 0.45);
 
-  /* provider identity — also distinguished by label + pattern, never colour alone */
-  --p-tabi: #38bdf8;
-  --p-gorouter: #a78bfa;
-  --p-justwoker: #f59e0b;
+  /* Provider identity is NOT tokenised per-id here: the hue arrives at runtime
+   * from the provider id (see `colorFor` in app.js), because a token can only
+   * exist for ids hardcoded at build time and providers.json is user-editable.
+   * Identity is also carried by the label, never colour alone. */
+  --provider-s: 72%;
+  --provider-l: 62%;
 
   /* ── spacing: 4/8px rhythm, overridden per density ────────────────────── */
   --s1: 4px;
@@ -156,9 +158,10 @@ html[data-theme="light"] {
   --warn: #b45309;
   --danger: #dc2626;
   --violet: #7c3aed;
-  --p-tabi: #0369a1;
-  --p-gorouter: #6d28d9;
-  --p-justwoker: #b45309;
+  /* Provider hue arrives per-badge as `--ph`; lightness/saturation live here so
+   * the light theme can darken them for contrast on white, same as `--accent`. */
+  --provider-s: 68%;
+  --provider-l: 34%;
   --glow: hsl(var(--accent-h) var(--accent-s) var(--accent-l) / 0.06);
   --scrim: rgba(15, 23, 42, 0.42);
   --shadow-1: 0 1px 2px rgba(15, 23, 42, 0.07);
@@ -534,8 +537,11 @@ tbody tr:hover { background: var(--surface-2); }
 .badge.ok      { color: var(--accent); border-color: var(--accent-dim); }
 .badge.warn    { color: var(--warn);   border-color: var(--warn); }
 .badge.bad     { color: var(--danger); border-color: var(--danger); }
-.badge.tabi     { color: var(--p-tabi);     border-color: var(--p-tabi); }
-.badge.gorouter { color: var(--p-gorouter); border-color: var(--p-gorouter); }
+.badge-provider {
+  color: hsl(var(--ph) var(--provider-s) var(--provider-l));
+  border-color: currentColor;
+  background: color-mix(in srgb, currentColor 12%, transparent);
+}
 
 /* ── forms ───────────────────────────────────────────────────────────────── */
 
@@ -1344,3 +1350,37 @@ header.top { background-image: radial-gradient(120% 340% at 12% -60%, var(--glow
   font-size: 0.75rem;
 }
 .fresh[data-stale="1"] .bar i { background: var(--warn); }
+
+/* ── sessions page ────────────────────────────────────────────────────────── */
+
+/* The counters under a session name. A separate node from the badge above it so
+   patching the numbers never rebuilds the badge — and never restarts the
+   working dot's pulse, which every push would otherwise reset. */
+.sess-meta {
+  display: block;
+  font-size: 0.6875rem;
+  color: var(--fg-faint);
+  white-space: nowrap;
+}
+
+/* The snapshot-cap note. `.note` and `.help` are scoped to `.setting` and
+   `.field` in this stylesheet, so a plain paragraph inside a card needs its own
+   rule to read at the right size and weight. */
+.sess-note {
+  margin: var(--s2) 0 0;
+  font-size: 0.75rem;
+  color: var(--fg-faint);
+}
+
+/* A non-zero failure count. The number itself is the message; this is only an
+   accent — colour is never the sole carrier of meaning. */
+tbody td.bad { color: var(--danger); }
+
+/* Freshness of the auto-refreshed drawer: it is how you tell a live number
+   from a frozen one. */
+.drawer header .hint {
+  font-weight: 400;
+  color: var(--fg-faint);
+  font-size: 0.75rem;
+  white-space: nowrap;
+}

@@ -166,6 +166,20 @@ fn build_request(
     key: &str,
     flavor: ApiFlavor,
 ) -> Result<Request<Full<Bytes>>, String> {
+    // `host` comes from provider config, where it is natural to write
+    // "https://example.com" (and the bundled defaults do). Formatting that
+    // straight into the URI yields "https://https://example.com/...", and
+    // hyper then tries to resolve the literal string "https://example.com" as a
+    // hostname - which surfaces as the very misleading
+    // "failed to lookup address information: No address associated with
+    // hostname" and silently takes the whole gateway offline.
+    //
+    // Accept a host with or without a scheme, and tolerate a trailing slash.
+    let host = host
+        .trim()
+        .trim_end_matches('/')
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
     let uri = format!("https://{host}{path}");
     let mut req = Request::builder().method(method.clone()).uri(&uri);
     {
