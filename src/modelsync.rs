@@ -337,7 +337,7 @@ mod tests {
             block.push_str(&format!(
                 "        \"{id}\": {{ \"id\": \"{id}\", \"name\": \"{}\", \
                  \"limit\": {{ \"context\": {}, \"output\": {} }} }}",
-                pretty(&id),
+                pretty(id),
                 config::OPENCODE_CONTEXT_LIMIT,
                 config::OPENCODE_OUTPUT_LIMIT
             ));

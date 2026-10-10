@@ -421,9 +421,9 @@ pub async fn probe_any_provider(app: &App) -> bool {
     for p in providers {
         // Rotates through the pool so a provider whose FIRST key is dead but
         // whose other keys are funded still proves liveness.
-        for k in app.pool(&p.id).into_iter().take(3) {
+        for k in app.pool(p.id).into_iter().take(3) {
             any_had_key = true;
-            if let upstream::Attempt::Ok(_) = upstream::probe_models(&p.host, &k).await {
+            if let upstream::Attempt::Ok(_) = upstream::probe_models(p.host, k).await {
                 return true;
             }
         }

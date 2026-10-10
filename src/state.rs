@@ -917,18 +917,17 @@ impl App {
                     .provider(id)
                     .map(|p| p.models.clone())
                     .unwrap_or_default();
-                let (model_pen, has_model) = if model.is_empty() {
-                    (0.0, true)
-                } else if declared.iter().any(|m| m == model) {
-                    (0.0, true)
-                } else {
-                    match rt.map(|r| &r.models_seen) {
-                        Some(list) if list.is_empty() => (0.0, true),
-                        Some(list) if list.iter().any(|m| m == model) => (0.0, true),
-                        Some(_) => (model_pen_w, false),
-                        None => (0.0, true),
-                    }
-                };
+                let (model_pen, has_model) =
+                    if model.is_empty() || declared.iter().any(|m| m == model) {
+                        (0.0, true)
+                    } else {
+                        match rt.map(|r| &r.models_seen) {
+                            Some(list) if list.is_empty() => (0.0, true),
+                            Some(list) if list.iter().any(|m| m == model) => (0.0, true),
+                            Some(_) => (model_pen_w, false),
+                            None => (0.0, true),
+                        }
+                    };
 
                 // Circuit breaker.
                 let breaker_pen = match rt {
@@ -2454,8 +2453,8 @@ mod tests {
         // The ladder may only return ids from that set — the property the
         // literal-id tests silently violated.
         let known: std::collections::HashSet<&str> = ids.iter().map(|s| s.as_str()).collect();
-        for rung in 0..ids.len() {
-            app.note_latency(&ids[rung], 500 + rung as u64 * 100);
+        for (rung, id) in ids.iter().enumerate() {
+            app.note_latency(id, 500 + rung as u64 * 100);
         }
         let order = app.provider_order(None);
         assert_eq!(order.len(), ids.len(), "order was {order:?}");

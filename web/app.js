@@ -2629,10 +2629,6 @@ function paintLeaderboard(d) {
 /* ── session detail drawer ───────────────────────────────────────────────── */
 
 let sdLastFocus = null;
-
-/* ── session detail drawer ───────────────────────────────────────────────── */
-
-let sdLastFocus = null;
 /** Fingerprint on screen, so the refresh timer has something to re-fetch. */
 let sdFp = null;
 /** Monotonic token: only the newest open or reload may paint the drawer. */
