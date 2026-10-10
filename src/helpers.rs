@@ -458,8 +458,7 @@ const NET_PROBE_TARGETS: &[&str] = &[
     // Deliberately infrastructure, never a configured provider: these must not
     // be affected by a key being empty, a provider being disabled, or a domain
     // being retired. Any one of them answering proves the link works.
-    "1.1.1.1",
-    "8.8.8.8",
+    "1.1.1.1", "8.8.8.8",
 ];
 
 /// Record a transport failure against the device, not against a provider.
@@ -616,7 +615,7 @@ pub async fn probe_all_unprobed(app: Arc<App>, reason: &str) {
                 }
                 let key = { iter.lock().await.next() };
                 let Some(key) = key else { break };
-                  let host = {
+                let host = {
                     let g = app.lock();
                     g.keys
                         .get(&key)
@@ -662,7 +661,6 @@ pub async fn probe_all_unprobed(app: Arc<App>, reason: &str) {
     eprintln!("[probe] finished {n}/{total} ({reason})");
     app.save();
 }
-
 
 /// Keep the proxy pool alive without supervision.
 ///
@@ -713,9 +711,7 @@ pub fn spawn_fast_model_sync(app: Arc<App>) {
                         let now = config::now_secs();
                         let g = app.lock();
                         pool.iter()
-                            .find(|k| {
-                                g.keys.get(*k).map(|s| s.dead_until <= now).unwrap_or(false)
-                            })
+                            .find(|k| g.keys.get(*k).map(|s| s.dead_until <= now).unwrap_or(false))
                             .cloned()
                             .or_else(|| pool.first().cloned())
                     };
@@ -728,9 +724,7 @@ pub fn spawn_fast_model_sync(app: Arc<App>) {
                                 app.set_models_seen(p.id, ids.clone());
                                 // Union into settings (memory)
                                 let mut s = app.settings.lock().unwrap();
-                                if let Some(cfg) =
-                                    s.providers.iter_mut().find(|c| c.id == p.id)
-                                {
+                                if let Some(cfg) = s.providers.iter_mut().find(|c| c.id == p.id) {
                                     for m in ids {
                                         if !cfg.models.contains(&m) {
                                             cfg.models.push(m);
@@ -838,11 +832,8 @@ async fn refill_proxies(app: &Arc<App>) -> usize {
 
     // Skip anything already in the pool, then take a bounded batch. Candidates
     // arrive sorted best-first, so the batch is the most promising slice.
-    let known: std::collections::HashSet<String> = pool
-        .snapshot()
-        .into_iter()
-        .map(|(e, _)| e.addr())
-        .collect();
+    let known: std::collections::HashSet<String> =
+        pool.snapshot().into_iter().map(|(e, _)| e.addr()).collect();
     let batch: Vec<crate::proxy::ProxyEndpoint> = candidates
         .into_iter()
         .filter(|e| !known.contains(&e.addr()))
@@ -855,17 +846,16 @@ async fn refill_proxies(app: &Arc<App>) -> usize {
     // A provider + key to vet against. Any funded key works; this is a free
     // endpoint, so it costs nothing.
     let Some((host, key)) = vet_target(app) else {
-        app.event("warn", "proxy: no key available to vet proxies with".to_string());
+        app.event(
+            "warn",
+            "proxy: no key available to vet proxies with".to_string(),
+        );
         return 0;
     };
 
     app.event(
         "info",
-        format!(
-            "proxy: vetting {} candidates from {}",
-            batch.len(),
-            source
-        ),
+        format!("proxy: vetting {} candidates from {}", batch.len(), source),
     );
 
     // Bounded concurrency: a burst of parallel connections from one device to one

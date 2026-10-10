@@ -300,7 +300,10 @@ pub async fn vet_proxy(
             }
         }
         Ok(Err(e)) => Err(flatten_err(e)),
-        Err(_) => Err(format!("timeout after {}s", config::proxy_vet_timeout_secs())),
+        Err(_) => Err(format!(
+            "timeout after {}s",
+            config::proxy_vet_timeout_secs()
+        )),
     }
 }
 
@@ -506,8 +509,12 @@ pub async fn probe_capabilities(host: &str, key: &str) -> (bool, bool) {
         // Minimal probe body — model name is a placeholder, we only care if the
         // endpoint answers (not 404/401/403). A real request carries the actual model.
         let body = match flavor {
-            ApiFlavor::Anthropic => br#"{"model":"x","max_tokens":1,"messages":[{"role":"user","content":"x"}]}"#.to_vec(),
-            _ => br#"{"model":"x","max_tokens":1,"messages":[{"role":"user","content":"x"}]}"#.to_vec(),
+            ApiFlavor::Anthropic => {
+                br#"{"model":"x","max_tokens":1,"messages":[{"role":"user","content":"x"}]}"#
+                    .to_vec()
+            }
+            _ => br#"{"model":"x","max_tokens":1,"messages":[{"role":"user","content":"x"}]}"#
+                .to_vec(),
         };
         let ok = match send(
             &host,

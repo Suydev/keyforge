@@ -152,7 +152,6 @@ impl ProxyEndpoint {
     }
 }
 
-
 /// Parse a ProxyScrape-style JSON list into endpoints.
 ///
 /// Only `http` proxies with `ssl: true` are accepted, and that is not a
@@ -188,7 +187,9 @@ pub fn parse_proxyscrape_json(bytes: &[u8]) -> Vec<ProxyEndpoint> {
         if r.get("alive").and_then(|x| x.as_bool()) == Some(false) {
             continue;
         }
-        let Some(ip) = r.get("ip").and_then(|x| x.as_str()) else { continue };
+        let Some(ip) = r.get("ip").and_then(|x| x.as_str()) else {
+            continue;
+        };
         let port = match r.get("port") {
             Some(serde_json::Value::Number(n)) => n.as_u64().unwrap_or(0),
             Some(serde_json::Value::String(s)) => s.parse().unwrap_or(0),
@@ -198,7 +199,10 @@ pub fn parse_proxyscrape_json(bytes: &[u8]) -> Vec<ProxyEndpoint> {
             continue;
         }
         let uptime = r.get("uptime").and_then(|x| x.as_f64()).unwrap_or(0.0);
-        let timeout = r.get("timeout").and_then(|x| x.as_f64()).unwrap_or(f64::MAX);
+        let timeout = r
+            .get("timeout")
+            .and_then(|x| x.as_f64())
+            .unwrap_or(f64::MAX);
         out.push((
             uptime,
             timeout,
@@ -622,7 +626,6 @@ impl ProxyPool {
         st.last_error = err.chars().take(160).collect();
     }
 
-
     /// Retire an egress that answered 429, without blaming the proxy itself.
     ///
     /// A rate limit is a property of the address the request LEFT from, not of
@@ -737,14 +740,12 @@ impl ProxyPool {
     pub fn save_file(&self, path: &std::path::Path) -> std::io::Result<usize> {
         let mut rows = self.snapshot();
         rows.sort_by(|a, b| {
-            b.1.ok
-                .cmp(&a.1.ok)
-                .then_with(|| {
-                    a.1.ewma_ms
-                        .unwrap_or(f64::MAX)
-                        .partial_cmp(&b.1.ewma_ms.unwrap_or(f64::MAX))
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
+            b.1.ok.cmp(&a.1.ok).then_with(|| {
+                a.1.ewma_ms
+                    .unwrap_or(f64::MAX)
+                    .partial_cmp(&b.1.ewma_ms.unwrap_or(f64::MAX))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
         });
         let mut out = String::new();
         out.push_str("# Vetted proxy pool, written by keyforge.\n");
@@ -759,7 +760,9 @@ impl ProxyPool {
                 "  # ok={} fail={} {} vetted={}\n",
                 hst.ok,
                 hst.fail,
-                hst.ewma_ms.map(|v| format!("{}ms", v.round())).unwrap_or_else(|| "unmeasured".into()),
+                hst.ewma_ms
+                    .map(|v| format!("{}ms", v.round()))
+                    .unwrap_or_else(|| "unmeasured".into()),
                 hst.vetted_at
             ));
         }
@@ -967,9 +970,18 @@ mod tests {
         let addrs: Vec<String> = got.iter().map(|e| e.addr()).collect();
         assert!(addrs.contains(&"1.1.1.1:8080".to_string()));
         assert!(addrs.contains(&"2.2.2.2:3128".to_string()));
-        assert!(!addrs.iter().any(|a| a.starts_with("3.3.3.3")), "socks5 must be dropped");
-        assert!(!addrs.iter().any(|a| a.starts_with("4.4.4.4")), "ssl:false must be dropped");
-        assert!(!addrs.iter().any(|a| a.starts_with("5.5.5.5")), "alive:false must be dropped");
+        assert!(
+            !addrs.iter().any(|a| a.starts_with("3.3.3.3")),
+            "socks5 must be dropped"
+        );
+        assert!(
+            !addrs.iter().any(|a| a.starts_with("4.4.4.4")),
+            "ssl:false must be dropped"
+        );
+        assert!(
+            !addrs.iter().any(|a| a.starts_with("5.5.5.5")),
+            "alive:false must be dropped"
+        );
         assert_eq!(got.len(), 2);
     }
 
@@ -1093,7 +1105,10 @@ mod tests {
         assert!(!p.needs_refill(), "exactly at the floor is still enough");
         p.note_fail("10.0.0.0:8000", "x");
         assert_eq!(p.healthy_count(), refill_below() - 1);
-        assert!(p.needs_refill(), "one below the floor must request a refill");
+        assert!(
+            p.needs_refill(),
+            "one below the floor must request a refill"
+        );
         // A disabled pool never asks, or a user who turned proxies off would
         // still see background refetching.
         p.set_enabled(false);
@@ -1172,11 +1187,11 @@ mod tests {
         let n = p.save_file(&f).unwrap();
         assert_eq!(n, 3);
         let text = std::fs::read_to_string(&f).unwrap();
-        let first_entry = text
-            .lines()
-            .find(|l| !l.starts_with('#'))
-            .unwrap();
-        assert!(first_entry.starts_with("10.0.0.2:8000"), "most successes first, got {first_entry}");
+        let first_entry = text.lines().find(|l| !l.starts_with('#')).unwrap();
+        assert!(
+            first_entry.starts_with("10.0.0.2:8000"),
+            "most successes first, got {first_entry}"
+        );
         // Reloading must preserve the set.
         let p2 = ProxyPool::new();
         assert_eq!(p2.load_file(&f), 3);

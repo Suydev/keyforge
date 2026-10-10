@@ -155,25 +155,25 @@ pub fn key_prefix() -> String {
     std::env::var("KEYFORGE_KEY_PREFIX").unwrap_or_else(|_| KEY_PREFIX.into())
 }
 
-  /// Accepted key prefixes. `KEYFORGE_KEY_PREFIXES` is a comma-separated list;
-  /// a single `KEYFORGE_KEY_PREFIX` still works. Defaults to `[KEY_PREFIX]`.
-  ///
-  /// Resellers and self-hosted gateways do not all mint `sk-` keys -- `sk_live_`,
-  /// `cc_` and similar are common -- so the accepted set has to be configurable
-  /// per deployment rather than hardcoded at the call site.
-  pub fn key_prefixes() -> Vec<String> {
-      if let Ok(list) = std::env::var("KEYFORGE_KEY_PREFIXES") {
-          let parts: Vec<String> = list
-              .split(',')
-              .map(|p| p.trim().to_string())
-              .filter(|p| !p.is_empty())
-              .collect();
-          if !parts.is_empty() {
-              return parts;
-          }
-      }
-      vec![key_prefix()]
-  }
+/// Accepted key prefixes. `KEYFORGE_KEY_PREFIXES` is a comma-separated list;
+/// a single `KEYFORGE_KEY_PREFIX` still works. Defaults to `[KEY_PREFIX]`.
+///
+/// Resellers and self-hosted gateways do not all mint `sk-` keys -- `sk_live_`,
+/// `cc_` and similar are common -- so the accepted set has to be configurable
+/// per deployment rather than hardcoded at the call site.
+pub fn key_prefixes() -> Vec<String> {
+    if let Ok(list) = std::env::var("KEYFORGE_KEY_PREFIXES") {
+        let parts: Vec<String> = list
+            .split(',')
+            .map(|p| p.trim().to_string())
+            .filter(|p| !p.is_empty())
+            .collect();
+        if !parts.is_empty() {
+            return parts;
+        }
+    }
+    vec![key_prefix()]
+}
 
 pub fn key_min_len() -> usize {
     env_u64("KEYFORGE_KEY_MIN_LEN", KEY_MIN_LEN as u64) as usize
@@ -191,7 +191,10 @@ pub fn key_min_len() -> usize {
 pub const NO_CHANNEL_COOLDOWN_SECS: u64 = 45;
 
 pub fn no_channel_cooldown_secs() -> u64 {
-    env_u64("KEYFORGE_NO_CHANNEL_COOLDOWN_SECS", NO_CHANNEL_COOLDOWN_SECS)
+    env_u64(
+        "KEYFORGE_NO_CHANNEL_COOLDOWN_SECS",
+        NO_CHANNEL_COOLDOWN_SECS,
+    )
 }
 
 /// Timeout for a NON-streaming request, where the head only arrives once the
@@ -321,7 +324,10 @@ pub fn uptime_retry_secs() -> u64 {
 pub const UPTIME_FAIL_THRESHOLD: u32 = 2;
 
 pub fn uptime_fail_threshold() -> u32 {
-    env_u64("KEYFORGE_UPTIME_FAIL_THRESHOLD", UPTIME_FAIL_THRESHOLD as u64) as u32
+    env_u64(
+        "KEYFORGE_UPTIME_FAIL_THRESHOLD",
+        UPTIME_FAIL_THRESHOLD as u64,
+    ) as u32
 }
 
 /// Wi-Fi link sampling interval (see `link.rs`).
@@ -501,7 +507,10 @@ pub fn proxy_vet_batch() -> usize {
 pub const PROXY_VET_CONCURRENCY: usize = 6;
 
 pub fn proxy_vet_concurrency() -> usize {
-    env_u64("KEYFORGE_PROXY_VET_CONCURRENCY", PROXY_VET_CONCURRENCY as u64) as usize
+    env_u64(
+        "KEYFORGE_PROXY_VET_CONCURRENCY",
+        PROXY_VET_CONCURRENCY as u64,
+    ) as usize
 }
 
 /// Per-attempt timeout when vetting. Free proxies are slow; anything past this
@@ -564,7 +573,11 @@ pub fn providers_from_settings(s: &crate::settings::Settings) -> Vec<Provider> {
         .iter()
         .filter(|p| p.enabled)
         .filter_map(|p| {
-            let host = p.hosts.iter().find(|h| h.enabled).map(|h| h.host.as_str())?;
+            let host = p
+                .hosts
+                .iter()
+                .find(|h| h.enabled)
+                .map(|h| h.host.as_str())?;
             Some(Provider {
                 id: Box::leak(p.id.clone().into_boxed_str()),
                 label: Box::leak(p.label.clone().into_boxed_str()),

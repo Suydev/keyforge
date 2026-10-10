@@ -657,16 +657,43 @@ mod tests {
         // Each of these means "out of credit" and carries a real balance, so the
         // two-signal QUOTA test should fire and learn the amount.
         let cases: &[(&str, f64)] = &[
-            (r#"{"error":{"message":"额度已用尽，剩余额度: ＄0.010000"}}"#, 0.01),
-            (r#"{"error":{"message":"您的账户余额不足，当前余额: ＄0.05"}}"#, 0.05),
-            (r#"{"error":{"message":"crédit insuffisant, solde: ＄0.02"}}"#, 0.02),
-            (r#"{"error":{"message":"saldo insuficiente, saldo restante: ＄0.03"}}"#, 0.03),
-            (r#"{"error":{"message":"Kontostand erschöpft, Guthaben: ＄0.04"}}"#, 0.04),
-            (r#"{"error":{"message":"saldo insuficiente para la solicitud, saldo: ＄0.06"}}"#, 0.06),
-            (r#"{"error":{"message":"недостаточно средств, остаток: ＄0.07"}}"#, 0.07),
-            (r#"{"error":{"message":"insufficient funds: account balance is ＄0.08"}}"#, 0.08),
+            (
+                r#"{"error":{"message":"额度已用尽，剩余额度: ＄0.010000"}}"#,
+                0.01,
+            ),
+            (
+                r#"{"error":{"message":"您的账户余额不足，当前余额: ＄0.05"}}"#,
+                0.05,
+            ),
+            (
+                r#"{"error":{"message":"crédit insuffisant, solde: ＄0.02"}}"#,
+                0.02,
+            ),
+            (
+                r#"{"error":{"message":"saldo insuficiente, saldo restante: ＄0.03"}}"#,
+                0.03,
+            ),
+            (
+                r#"{"error":{"message":"Kontostand erschöpft, Guthaben: ＄0.04"}}"#,
+                0.04,
+            ),
+            (
+                r#"{"error":{"message":"saldo insuficiente para la solicitud, saldo: ＄0.06"}}"#,
+                0.06,
+            ),
+            (
+                r#"{"error":{"message":"недостаточно средств, остаток: ＄0.07"}}"#,
+                0.07,
+            ),
+            (
+                r#"{"error":{"message":"insufficient funds: account balance is ＄0.08"}}"#,
+                0.08,
+            ),
             (r#"{"error":{"message":"요금 부족, 잔액: ＄0.09"}}"#, 0.09),
-            (r#"{"error":{"message":"アカウント残高が不足しています。残高: ＄0.12"}}"#, 0.12),
+            (
+                r#"{"error":{"message":"アカウント残高が不足しています。残高: ＄0.12"}}"#,
+                0.12,
+            ),
         ];
         for (body, want) in cases {
             let want = *want;
@@ -700,7 +727,11 @@ mod tests {
     fn a_refusal_phrase_without_a_status_agreement_is_still_caught() {
         // Providers that answer 429 or even 200 when out of credit. The status
         // must not be the only gate, or a paid failure reads as success.
-        let c = classify_http(429, "", r#"{"error":{"message":"insufficient funds, balance ＄0.00"}}"#);
+        let c = classify_http(
+            429,
+            "",
+            r#"{"error":{"message":"insufficient funds, balance ＄0.00"}}"#,
+        );
         assert_eq!(c.class, ErrClass::Quota, "detail was {}", c.detail);
     }
 
@@ -1071,4 +1102,3 @@ mod tests {
         assert_eq!(c.retry_after, Some(30));
     }
 }
-

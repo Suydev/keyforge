@@ -142,7 +142,9 @@ fn is_api_path(path: &str, app: &App) -> bool {
     if path.starts_with("/auto/v1/") {
         return true;
     }
-    app.providers.read().unwrap()
+    app.providers
+        .read()
+        .unwrap()
         .iter()
         .any(|p| path.starts_with(&format!("/{}/v1/", p.id)))
 }
@@ -207,7 +209,9 @@ async fn route(app: Arc<App>, req: Request<hyper::body::Incoming>) -> Response<B
     if path == "/api/keys" && method == Method::GET {
         let q = req.uri().query().unwrap_or("");
         let provider = query_param(q, "provider").unwrap_or_else(|| {
-            app.providers.read().unwrap()
+            app.providers
+                .read()
+                .unwrap()
                 .first()
                 .map(|p| p.id.to_string())
                 .unwrap_or_default()
@@ -419,7 +423,11 @@ async fn route(app: Arc<App>, req: Request<hyper::body::Incoming>) -> Response<B
         let keys: Vec<String> = v
             .get("keys")
             .and_then(|k| k.as_array())
-            .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .collect()
+            })
             .unwrap_or_default();
         return api::ok(api::add_provider(&app, label, host, &keys));
     }
@@ -535,7 +543,10 @@ async fn main() {
                 if !cands.is_empty() {
                     let take = cands.into_iter().take(config::proxy_vet_batch()).collect();
                     n_proxies = upstream::proxy_pool().add_endpoints(take);
-                    println!("  proxies    seeded {n_proxies} unvetted from {}", path.display());
+                    println!(
+                        "  proxies    seeded {n_proxies} unvetted from {}",
+                        path.display()
+                    );
                     break;
                 }
             }
@@ -604,15 +615,15 @@ async fn main() {
         tokio::spawn(async move {
             #[cfg(unix)]
             let shutdown = async {
-                let mut term = match tokio::signal::unix::signal(
-                    tokio::signal::unix::SignalKind::terminate(),
-                ) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!("keyforge: cannot install SIGTERM handler: {e}");
-                        return;
-                    }
-                };
+                let mut term =
+                    match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    {
+                        Ok(s) => s,
+                        Err(e) => {
+                            eprintln!("keyforge: cannot install SIGTERM handler: {e}");
+                            return;
+                        }
+                    };
                 term.recv().await;
             };
             #[cfg(not(unix))]

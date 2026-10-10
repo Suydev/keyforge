@@ -402,8 +402,7 @@ mod tests {
             .collect();
         // The model is required by the request shape but never inspected:
         // fingerprinting reads the system block and the first user message.
-        serde_json::to_vec(&serde_json::json!({ "model": "test-model", "messages": arr }))
-            .unwrap()
+        serde_json::to_vec(&serde_json::json!({ "model": "test-model", "messages": arr })).unwrap()
     }
 
     #[test]

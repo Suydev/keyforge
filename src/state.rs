@@ -541,7 +541,12 @@ impl App {
     }
 
     pub fn provider(&self, id: &str) -> Option<Provider> {
-        self.providers.read().unwrap().iter().find(|p| p.id == id).cloned()
+        self.providers
+            .read()
+            .unwrap()
+            .iter()
+            .find(|p| p.id == id)
+            .cloned()
     }
 
     /// Rebuild the provider list from the current settings. Called after a
@@ -856,7 +861,8 @@ impl App {
         };
         let pools: Vec<(String, usize)> = self
             .providers
-            .read().unwrap()
+            .read()
+            .unwrap()
             .iter()
             .map(|p| (p.id.to_string(), self.pool(p.id).len()))
             .collect();
@@ -900,26 +906,29 @@ impl App {
                 let slow = decayed_slow(rt, now, halflife);
                 let slow_pen = (slow * slow) * streak_weight * 0.25;
 
-                 // Model availability. has_model is authoritative when any provider
-                 // advertises the model: a provider whose known list lacks it is
-                 // excluded outright below, not merely penalised. Unknown (never
-                 // probed) still counts as capable — /v1/models can be stale.
-                 // The declared models list (from settings) is unioned with the
-                 // probed list, so a provider the user KNOWS serves a model is
-                 // never penalised just because the probe came back empty.
-                 let declared = self.provider(id).map(|p| p.models.clone()).unwrap_or_default();
-                 let (model_pen, has_model) = if model.is_empty() {
-                     (0.0, true)
-                 } else if declared.iter().any(|m| m == model) {
-                     (0.0, true)
-                 } else {
-                     match rt.map(|r| &r.models_seen) {
-                         Some(list) if list.is_empty() => (0.0, true),
-                         Some(list) if list.iter().any(|m| m == model) => (0.0, true),
-                         Some(_) => (model_pen_w, false),
-                         None => (0.0, true),
-                     }
-                 };
+                // Model availability. has_model is authoritative when any provider
+                // advertises the model: a provider whose known list lacks it is
+                // excluded outright below, not merely penalised. Unknown (never
+                // probed) still counts as capable — /v1/models can be stale.
+                // The declared models list (from settings) is unioned with the
+                // probed list, so a provider the user KNOWS serves a model is
+                // never penalised just because the probe came back empty.
+                let declared = self
+                    .provider(id)
+                    .map(|p| p.models.clone())
+                    .unwrap_or_default();
+                let (model_pen, has_model) = if model.is_empty() {
+                    (0.0, true)
+                } else if declared.iter().any(|m| m == model) {
+                    (0.0, true)
+                } else {
+                    match rt.map(|r| &r.models_seen) {
+                        Some(list) if list.is_empty() => (0.0, true),
+                        Some(list) if list.iter().any(|m| m == model) => (0.0, true),
+                        Some(_) => (model_pen_w, false),
+                        None => (0.0, true),
+                    }
+                };
 
                 // Circuit breaker.
                 let breaker_pen = match rt {
@@ -946,7 +955,8 @@ impl App {
                     has_model,
                 )
             })
-            .map(|(id, a, b, c)| (id.clone(), a, b, c)).collect();
+            .map(|(id, a, b, c)| (id.clone(), a, b, c))
+            .collect();
 
         scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
@@ -1023,7 +1033,8 @@ impl App {
                     + if open { 500.0 } else { 0.0 };
                 (id.clone(), (score * 1000.0).round() / 1000.0)
             })
-            .map(|(id, f)| (id.clone(), f)).collect()
+            .map(|(id, f)| (id.clone(), f))
+            .collect()
     }
 
     // ── mutations ───────────────────────────────────────────────────────────
@@ -2237,7 +2248,11 @@ mod tests {
             ("sk-a000000000000000000x", Some(10.0)),
             ("sk-b000000000000000000x", Some(20.0)),
         ]);
-        let c = app.candidates(TEST_PROVIDER, "fp1", &["sk-a000000000000000000x".to_string()]);
+        let c = app.candidates(
+            TEST_PROVIDER,
+            "fp1",
+            &["sk-a000000000000000000x".to_string()],
+        );
         assert_eq!(c, vec!["sk-b000000000000000000x".to_string()]);
     }
 
@@ -2438,8 +2453,7 @@ mod tests {
 
         // The ladder may only return ids from that set — the property the
         // literal-id tests silently violated.
-        let known: std::collections::HashSet<&str> =
-            ids.iter().map(|s| s.as_str()).collect();
+        let known: std::collections::HashSet<&str> = ids.iter().map(|s| s.as_str()).collect();
         for rung in 0..ids.len() {
             app.note_latency(&ids[rung], 500 + rung as u64 * 100);
         }
@@ -2592,14 +2606,24 @@ mod tests {
         // excluded outright, as long as somebody funded is left to serve.
         let app = app_all_providers();
         // Drain all providers' keys except the last one (which stays funded).
-        let ids: Vec<String> = app.providers.read().unwrap().iter().map(|p| p.id.to_string()).collect();
-        for id in &ids[..ids.len()-1] {
+        let ids: Vec<String> = app
+            .providers
+            .read()
+            .unwrap()
+            .iter()
+            .map(|p| p.id.to_string())
+            .collect();
+        for id in &ids[..ids.len() - 1] {
             for k in app.pool(id) {
                 app.mark_dead(&k, 3600, "quota");
             }
         }
         let order = app.provider_order(None);
-        assert_eq!(order.first().unwrap(), ids.last().unwrap(), "order was {order:?}");
+        assert_eq!(
+            order.first().unwrap(),
+            ids.last().unwrap(),
+            "order was {order:?}"
+        );
         assert!(
             !order.contains(&ids[0]),
             "a provably dry provider must not cost a rung, order was {order:?}"
@@ -2717,18 +2741,7 @@ mod tests {
         app.set_usage(&key, 0.0);
         // Anthropic path reports cost directly.
         app.record_request(
-            "fp",
-            "",
-            &ids[0],
-            &key,
-            TEST_MODEL,
-            true,
-            900,
-            10,
-            20,
-            1.0,
-            5,
-            5,
+            "fp", "", &ids[0], &key, TEST_MODEL, true, 900, 10, 20, 1.0, 5, 5,
         );
         let after_response = app.lock().totals.cost;
         assert!((after_response - 1.0).abs() < 1e-9);
@@ -2981,13 +2994,9 @@ mod tests {
         app.note_client_request();
         // five failed attempts, then one success — ONE client request
         for _ in 0..5 {
-            app.record_request(
-                "fp", "", &ids[1], &key, "m", false, 100, 10, 0, 0.0, 0, 0,
-            );
+            app.record_request("fp", "", &ids[1], &key, "m", false, 100, 10, 0, 0.0, 0, 0);
         }
-        app.record_request(
-            "fp", "", &ids[1], &key, "m", true, 100, 10, 20, 0.01, 5, 5,
-        );
+        app.record_request("fp", "", &ids[1], &key, "m", true, 100, 10, 20, 0.01, 5, 5);
         app.note_client_outcome(&ids[1], true, true);
 
         let g = app.lock();
@@ -3167,7 +3176,10 @@ mod tests {
         );
         // One sample is not policy: still default.
         app.note_latency_split(&ids[0], 2000, 2000);
-        assert_eq!(app.head_budget_secs(&ids[0], 0), config::head_default_secs());
+        assert_eq!(
+            app.head_budget_secs(&ids[0], 0),
+            config::head_default_secs()
+        );
         // Two samples: 3x EWMA of ~2s = ~6s, clamped up to the floor.
         app.note_latency_split(&ids[0], 2000, 2000);
         assert_eq!(

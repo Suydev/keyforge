@@ -363,8 +363,13 @@ fn rewrite_model(body: &Bytes, map: &std::collections::HashMap<String, String>) 
     let Some(mapped) = map.get(model) else {
         return body.clone();
     };
-    obj.insert("model".to_string(), serde_json::Value::String(mapped.clone()));
-    serde_json::to_vec(&v).map(Bytes::from).unwrap_or_else(|_| body.clone())
+    obj.insert(
+        "model".to_string(),
+        serde_json::Value::String(mapped.clone()),
+    );
+    serde_json::to_vec(&v)
+        .map(Bytes::from)
+        .unwrap_or_else(|_| body.clone())
 }
 
 pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Body> {
@@ -798,17 +803,17 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
                     out_of_time = true;
                     break;
                 }
-                 let head_budget = head_budget.min(remaining);
-                 meta.budget_secs = head_budget.as_secs();
-                 meta.ttfb_ms = None;
-                 meta.head_timeout = false;
+                let head_budget = head_budget.min(remaining);
+                meta.budget_secs = head_budget.as_secs();
+                meta.ttfb_ms = None;
+                meta.head_timeout = false;
 
-                 // Rewrite the model name if this provider has a mapping for it.
-                 // A client asking for `claude-opus-5` can land on a provider whose
-                 // channel names it something else — the map is the bridge.
-                 let body_bytes = rewrite_model(&body_bytes, &provider.model_map);
+                // Rewrite the model name if this provider has a mapping for it.
+                // A client asking for `claude-opus-5` can land on a provider whose
+                // channel names it something else — the map is the bridge.
+                let body_bytes = rewrite_model(&body_bytes, &provider.model_map);
 
-                 let attempt = upstream::send_head(
+                let attempt = upstream::send_head(
                     provider.host,
                     &route.path,
                     &parts.method,
@@ -1474,7 +1479,10 @@ mod tests {
         // The prefixes are whatever `providers.json` configured, so derive them:
         // a literal id here only passes on the machine that wrote the test.
         let ps = provs();
-        assert!(ps.len() >= 2, "need two configured providers to tell them apart");
+        assert!(
+            ps.len() >= 2,
+            "need two configured providers to tell them apart"
+        );
         let (first, second) = (ps[0].id, ps[1].id);
 
         let r = parse_route(&format!("/{first}/v1/chat/completions"), &ps);

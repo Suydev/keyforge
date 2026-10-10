@@ -680,7 +680,11 @@ fn normalize_host(raw: &str) -> String {
     if let Some(pos) = h.find("://") {
         h = &h[pos + 3..];
     }
-    h.split(['/', '?', '#']).next().unwrap_or("").trim().to_string()
+    h.split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string()
 }
 
 /// Make a stable provider id from a free-text label: lowercase, and every run
