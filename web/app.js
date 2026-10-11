@@ -557,8 +557,14 @@ function onSnapshot(snap) {
     }
   }
 
-  // Errors tab badge: shows unseen failure count, clears when you visit the tab.
-  const errTotal = (snap.errorsLog || []).length;
+  // Errors tab badge: counts failures inside a live window, not the whole
+  // 500-entry history. Without the window a long-past outage keeps its badge
+  // lit forever and the tab reads as permanently broken.
+  const WINDOW_S = 300;
+  const windowed = (snap.errorsLog || []).filter(
+    (e) => !e || typeof e.t !== 'number' || (Date.now() / 1000 - e.t) < WINDOW_S
+  );
+  const errTotal = windowed.length;
   const badge = $('#errBadge');
   if (badge) {
     const unseen = Math.max(0, errTotal - (state.seenErrors || 0));
@@ -2078,8 +2084,18 @@ const ERR_TONE = {
 let errFilter = '';
 
 function renderErrors(s) {
-  const byClass = s.errorsByClass || {};
-  const all = s.errorsLog || [];
+  // Everything on this tab is scoped to a live 5-minute window so a resolved
+  // outage does not keep reading as a current one. The raw 500-entry history is
+  // still available from /api/errors (with ?since= for a window).
+  const WINDOW_S = 300;
+  const nowS = Date.now() / 1000;
+  const inWindow = (e) => !e || typeof e.t !== 'number' || (nowS - e.t) < WINDOW_S;
+  const all = (s.errorsLog || []).filter(inWindow);
+  const byClass = {};
+  for (const e of all) {
+    const c = e.class || 'OTHER';
+    byClass[c] = (byClass[c] || 0) + 1;
+  }
 
   // ── breakdown tiles ──────────────────────────────────────────────────────
   const kpis = $('#errClassKpis');

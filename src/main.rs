@@ -267,10 +267,15 @@ async fn route(app: Arc<App>, req: Request<hyper::body::Incoming>) -> Response<B
             .unwrap_or(120usize)
             .min(500);
         let class = query_param(q, "class").unwrap_or_default();
+        // `?since=<unix_seconds>` keeps only errors newer than that, so a fixed
+        // history (capped at 500) does not read as a live outage: yesterday's
+        // failures stay on the tab but stop dominating it once traffic recovers.
+        let since = query_param(q, "since").and_then(|v| v.parse::<u64>().ok());
         let rows: Vec<serde_json::Value> = app
             .recent_errors(500)
             .into_iter()
             .filter(|e| class.is_empty() || e.class.eq_ignore_ascii_case(&class))
+            .filter(|e| since.map(|s| e.t >= s).unwrap_or(true))
             .take(limit)
             .map(|e| {
                 serde_json::json!({
