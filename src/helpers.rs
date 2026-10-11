@@ -423,7 +423,7 @@ pub async fn probe_any_provider(app: &App) -> bool {
         // whose other keys are funded still proves liveness.
         for k in app.pool(p.id).into_iter().take(3) {
             any_had_key = true;
-            if let upstream::Attempt::Ok(_) = upstream::probe_models(&p.host, &k).await {
+            if let upstream::Attempt::Ok(_) = upstream::probe_models(p.host, &k).await {
                 return true;
             }
         }

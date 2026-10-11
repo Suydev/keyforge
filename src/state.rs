@@ -2576,7 +2576,7 @@ mod tests {
         let app = app_all_providers();
         let n = app.providers.read().unwrap().len();
         for p in &*app.providers.read().unwrap() {
-            app.set_models_seen(&p.id, vec!["a".into()]);
+            app.set_models_seen(p.id, vec!["a".into()]);
         }
         let order = app.provider_order_for(None, "brand-new-model");
         assert_eq!(order.len(), n, "order was {order:?}");
@@ -2637,7 +2637,7 @@ mod tests {
         let app = app_all_providers();
         let n = app.providers.read().unwrap().len();
         for p in &*app.providers.read().unwrap() {
-            for k in app.pool(&p.id) {
+            for k in app.pool(p.id) {
                 app.mark_dead(&k, 3600, "quota");
             }
         }
