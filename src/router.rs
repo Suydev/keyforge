@@ -95,6 +95,238 @@ fn pipe(body: Incoming) -> Body {
     .boxed()
 }
 
+/// Convert an OpenAI-compatible SSE stream into the Anthropic Messages shape.
+///
+/// Zen only speaks OpenAI, but Claude Code (and every `/v1/messages` caller) needs
+/// Anthropic `message_start` / `content_block_*` / `message_stop` frames. This is a
+/// stateful transform over the upstream text delta stream: it maps each OpenAI
+/// `choices[0].delta.content` to an Anthropic `content_block_delta`, and closes
+/// with `message_stop`. Reasoning (`reasoning_content`) is folded into the text
+/// block, because the free tier is reasoning-first and Claude Code renders the
+/// text; a dedicated thinking block would need a signature this upstream does not
+/// send.
+mod oai2ant {
+    use bytes::Bytes;
+    use hyper::body::{Body, Frame, Incoming, SizeHint};
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    pub struct OaiToAnthropic {
+        pub inner: Incoming,
+        pub done: bool,
+        /// Buffered tail of an incomplete SSE line.
+        pub buf: String,
+        /// Anthropic has already emitted message_start.
+        pub started: bool,
+        /// Anthropic content_block_start has been emitted.
+        pub block_open: bool,
+        pub model: String,
+        pub msg_id: String,
+        pub stopped: bool,
+    }
+
+    impl OaiToAnthropic {
+        fn ev(&mut self, event: &str, data: serde_json::Value) -> Bytes {
+            Bytes::from(format!(
+                "event: {event}\ndata: {}\n\n",
+                serde_json::to_string(&data).unwrap_or_default()
+            ))
+        }
+
+        /// Convert one complete upstream SSE line (no trailing newline) into zero
+        /// or more Anthropic frames appended to `out`.
+        fn convert_line(&mut self, line: &str, out: &mut Vec<u8>) {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with(':') {
+                return;
+            }
+            let Some(rest) = line.strip_prefix("data:") else {
+                return;
+            };
+            let rest = rest.trim();
+            if rest == "[DONE]" {
+                self.finish(out);
+                return;
+            }
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(rest) else {
+                return;
+            };
+            if let Some(m) = v.get("model").and_then(|m| m.as_str()) {
+                if !m.is_empty() {
+                    self.model = m.to_string();
+                }
+            }
+            if !self.started {
+                self.started = true;
+                out.extend_from_slice(&self.ev(
+                    "message_start",
+                    serde_json::json!({
+                        "type": "message_start",
+                        "message": {
+                            "id": self.msg_id, "type": "message", "role": "assistant",
+                            "model": self.model, "content": [], "stop_reason": null,
+                            "stop_sequence": null,
+                            "usage": {"input_tokens": 0, "output_tokens": 0}
+                        }
+                    }),
+                ));
+            }
+            let Some(choice) = v.pointer("/choices/0").and_then(|c| c.as_object()) else {
+                return;
+            };
+            let delta = choice.get("delta");
+            let text = delta
+                .and_then(|d| {
+                    let a = d.get("content").and_then(|c| c.as_str()).unwrap_or("");
+                    let b = d.get("reasoning_content").and_then(|c| c.as_str()).unwrap_or("");
+                    let s = format!("{b}{a}");
+                    if s.is_empty() { None } else { Some(s) }
+                })
+                .unwrap_or_default();
+            if !text.is_empty() {
+                if !self.block_open {
+                    self.block_open = true;
+                    out.extend_from_slice(&self.ev(
+                        "content_block_start",
+                        serde_json::json!({
+                            "type": "content_block_start", "index": 0,
+                            "content_block": {"type": "text", "text": ""}
+                        }),
+                    ));
+                }
+                out.extend_from_slice(&self.ev(
+                    "content_block_delta",
+                    serde_json::json!({
+                        "type": "content_block_delta", "index": 0,
+                        "delta": {"type": "text_delta", "text": text}
+                    }),
+                ));
+            }
+            // usage arrives on the final chunk (stream_options.include_usage).
+            // Anthropic's message_delta carries CUMULATIVE output_tokens only --
+            // input_tokens belongs to message_start, not the delta. The spec says
+            // to mirror that, so a client accumulating usage sees the same
+            // numbers it would from api.anthropic.com.
+            if let Some(u) = v.get("usage").filter(|u| !u.is_null()) {
+                out.extend_from_slice(&self.ev(
+                    "message_delta",
+                    serde_json::json!({
+                        "type": "message_delta",
+                        "delta": {"stop_reason": "end_turn", "stop_sequence": null},
+                        "usage": {
+                            "output_tokens": u.get("completion_tokens").and_then(|x| x.as_u64()).unwrap_or(0)
+                        }
+                    }),
+                ));
+            }
+        }
+
+        fn finish(&mut self, out: &mut Vec<u8>) {
+            if self.stopped {
+                return;
+            }
+            if !self.started {
+                // Upstream produced nothing; still emit a well-formed empty turn so
+                // the client gets a message instead of a truncated stream.
+                self.started = true;
+                out.extend_from_slice(&self.ev(
+                    "message_start",
+                    serde_json::json!({
+                        "type": "message_start",
+                        "message": {
+                            "id": self.msg_id, "type": "message", "role": "assistant",
+                            "model": self.model, "content": [], "stop_reason": null,
+                            "stop_sequence": null,
+                            "usage": {"input_tokens": 0, "output_tokens": 0}
+                        }
+                    }),
+                ));
+            }
+            if self.block_open {
+                self.block_open = false;
+                out.extend_from_slice(&self.ev(
+                    "content_block_stop",
+                    serde_json::json!({"type": "content_block_stop", "index": 0}),
+                ));
+            }
+            if !self.stopped {
+                out.extend_from_slice(&self.ev(
+                    "message_stop",
+                    serde_json::json!({"type": "message_stop"}),
+                ));
+                self.stopped = true;
+            }
+        }
+    }
+
+    impl Body for OaiToAnthropic {
+        type Data = Bytes;
+        type Error = std::convert::Infallible;
+
+        fn poll_frame(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+            let mut pending: Vec<u8> = Vec::new();
+            loop {
+                match Pin::new(&mut self.inner).poll_frame(cx) {
+                    Poll::Ready(Some(Ok(f))) => {
+                        if let Some(d) = f.data_ref() {
+                            self.buf.push_str(&String::from_utf8_lossy(d));
+                            while let Some(i) = self.buf.find('\n') {
+                                let line: String = self.buf.drain(..=i).collect();
+                                self.convert_line(&line, &mut pending);
+                            }
+                        }
+                        if !pending.is_empty() {
+                            let b = Bytes::from(std::mem::take(&mut pending));
+                            return Poll::Ready(Some(Ok(Frame::data(b))));
+                        }
+                    }
+                    Poll::Ready(Some(Err(_))) => break,
+                    Poll::Ready(None) | Poll::Pending => break,
+                }
+            }
+            if !self.done {
+                self.done = true;
+                // Flush any trailing partial line, then close the message.
+                let tail = std::mem::take(&mut self.buf);
+                self.convert_line(&tail, &mut pending);
+                self.finish(&mut pending);
+                return Poll::Ready(Some(Ok(Frame::data(Bytes::from(pending)))));
+            }
+            Poll::Ready(None)
+        }
+
+        fn size_hint(&self) -> SizeHint {
+            SizeHint::default()
+        }
+    }
+}
+
+fn pipe_openai_as_anthropic(body: Incoming, model: &str) -> Body {
+    let safe: String = model
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .take(48)
+        .collect();
+    oai2ant::OaiToAnthropic {
+        inner: body,
+        done: false,
+        buf: String::new(),
+        started: false,
+        block_open: false,
+        model: model.to_string(),
+        msg_id: if safe.is_empty() {
+            format!("msg_{}", crate::config::now_secs())
+        } else {
+            format!("msg_{safe}")
+        },
+        stopped: false,
+    }
+    .boxed()
+}
+
 // ── request shape ───────────────────────────────────────────────────────────
 
 struct Route {
@@ -224,6 +456,12 @@ fn body_targets_zen(body: &[u8]) -> bool {
         || model.starts_with("opencode/")
         || model == "space-bunny-free"
         || model.ends_with("-free")
+}
+
+/// Is this provider host OpenCode Zen? Keyed on the host, so it stays correct even
+/// when the caller named a model that does not look free.
+fn is_zen_host(host: &str) -> bool {
+    host.contains("opencode.ai")
 }
 
 /// Fingerprint tools zen's gate requires on the wire.
@@ -635,20 +873,6 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
 
     let model = model_of(&body_bytes);
     let streaming = is_stream(&body_bytes);
-    // OpenCode Zen needs a different body shape than a normal OpenAI-compatible
-    // upstream: stream MUST be true, and all four of bash/glob/grep/read must be
-    // advertised, or the gateway answers 404 HTML and this gets classified as a
-    // WAF block. The caller's own tools win; the fingerprint tools are appended
-    // only when missing, so a duplicate name (which the gate also rejects) is
-    // impossible. Applied to the body the router forwards; the response is
-    // demuxed back to the caller's original shape by the existing stream
-    // handling, and a non-streaming caller simply gets the collected reply.
-    let zen_provider = body_targets_zen(&body_bytes);
-    let body_bytes = if zen_provider {
-        bytes::Bytes::from(zen_shape_body(&body_bytes))
-    } else {
-        body_bytes
-    };
     let mut errors: Vec<String> = Vec::new();
     // Did this request only succeed because we rotated a key or changed provider?
     // Counted so the dashboard can show saves the user never had to see.
@@ -920,14 +1144,24 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
                 // channel names it something else — the map is the bridge.
                 let body_bytes = rewrite_model(&body_bytes, &provider.model_map);
 
+                // OpenCode Zen serves ONLY the OpenAI route. When a client asks
+                // for an Anthropic path we translate the request shape and the
+                // reply back, instead of asking zen for a path it does not have
+                // (`/v1/messages` there is a web page and answers 404 HTML,
+                // which used to be misread as a Cloudflare WAF block).
+                let zen = is_zen_host(provider.host);
+                let upstream_path = if zen { "/zen/v1/chat/completions" } else { route.path.as_str() };
+                let upstream_flavor = if zen { crate::config::ApiFlavor::OpenAi } else { route.flavor };
+                let body_bytes = if zen { zen_shape_body(&body_bytes) } else { body_bytes.clone() };
+
                 let attempt = upstream::send_head(
                     provider.host,
-                    &route.path,
+                    upstream_path,
                     &parts.method,
                     &parts.headers,
-                    body_bytes.clone(),
+                    body_bytes,
                     &key,
-                    route.flavor,
+                    upstream_flavor,
                     head_budget,
                 )
                 .await;
@@ -1095,7 +1329,20 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
                             0,
                             0,
                         );
-                        let mut resp = Response::new(pipe(head.body));
+                        // A zen reply is OpenAI-shaped; an Anthropic client needs the
+                        // converted stream. Everything else passes through untouched.
+                        let zen_reply = zen && route.flavor == crate::config::ApiFlavor::Anthropic;
+                        let mut resp = if zen_reply {
+                            let b = pipe_openai_as_anthropic(head.body, &model);
+                            let mut r = Response::new(b);
+                            r.headers_mut().insert(
+                                hyper::header::CONTENT_TYPE,
+                                hyper::header::HeaderValue::from_static("text/event-stream"),
+                            );
+                            r
+                        } else {
+                            Response::new(pipe(head.body))
+                        };
                         *resp.status_mut() =
                             StatusCode::from_u16(head.status).unwrap_or(StatusCode::OK);
                         copy_response_headers(&head.headers, resp.headers_mut());
