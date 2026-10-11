@@ -123,6 +123,9 @@ mod oai2ant {
         pub model: String,
         pub msg_id: String,
         pub stopped: bool,
+        /// Cumulative output_tokens from the upstream usage chunk, flushed as
+        /// message_delta in finish() so it lands AFTER content_block_stop.
+        pub pending_usage: u64,
     }
 
     impl OaiToAnthropic {
@@ -207,17 +210,17 @@ mod oai2ant {
             // input_tokens belongs to message_start, not the delta. The spec says
             // to mirror that, so a client accumulating usage sees the same
             // numbers it would from api.anthropic.com.
+            //
+            // Buffered, NOT emitted here: the required order is
+            // content_block_stop -> message_delta -> message_stop, and usage
+            // arrives before the stream ends. finish() flushes it in the right
+            // slot, so a client accumulating on content_block_stop does not see
+            // message_delta first and drop the block.
             if let Some(u) = v.get("usage").filter(|u| !u.is_null()) {
-                out.extend_from_slice(&self.ev(
-                    "message_delta",
-                    serde_json::json!({
-                        "type": "message_delta",
-                        "delta": {"stop_reason": "end_turn", "stop_sequence": null},
-                        "usage": {
-                            "output_tokens": u.get("completion_tokens").and_then(|x| x.as_u64()).unwrap_or(0)
-                        }
-                    }),
-                ));
+                self.pending_usage = u
+                    .get("completion_tokens")
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(0);
             }
         }
 
@@ -249,6 +252,16 @@ mod oai2ant {
                     serde_json::json!({"type": "content_block_stop", "index": 0}),
                 ));
             }
+            // message_delta sits between content_block_stop and message_stop, and
+            // carries cumulative output_tokens only.
+            out.extend_from_slice(&self.ev(
+                "message_delta",
+                serde_json::json!({
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "end_turn", "stop_sequence": null},
+                    "usage": {"output_tokens": self.pending_usage}
+                }),
+            ));
             if !self.stopped {
                 out.extend_from_slice(&self.ev(
                     "message_stop",
@@ -323,6 +336,7 @@ fn pipe_openai_as_anthropic(body: Incoming, model: &str) -> Body {
             format!("msg_{safe}")
         },
         stopped: false,
+        pending_usage: 0,
     }
     .boxed()
 }
