@@ -294,18 +294,36 @@ mod oai2ant {
                         .and_then(|a| a.as_str())
                         .unwrap_or("");
                     if !id.is_empty() {
-                        // New tool call: close whatever block was open (text or a
-                        // previous tool) and start a fresh tool_use block.
+                        // A new tool call. OpenAI commonly sends `id`, `name`
+                        // and the first slice of `arguments` in the SAME delta,
+                        // so this must open exactly ONE block carrying the real
+                        // name (an extra stub here showed up downstream as a
+                        // duplicate tool_use with an empty name) and then stream
+                        // the arguments as input_json_delta.
                         self.close_block(out);
                         self.current_kind = "tool";
-                        self.ensure_block("tool_use", out);
+                        self.block_open = true;
                         out.extend_from_slice(&self.ev(
                             "content_block_start",
                             serde_json::json!({
                                 "type":"content_block_start","index": self.block_index,
-                                "content_block": {"type":"tool_use","id": id,"name": name,"input":{}}
+                                "content_block": {
+                                    "type":"tool_use",
+                                    "id": if id.is_empty() { format!("toolu_{}", self.block_index) } else { id.to_string() },
+                                    "name": name,
+                                    "input": {}
+                                }
                             }),
                         ));
+                        if !args.is_empty() {
+                            out.extend_from_slice(&self.ev(
+                                "content_block_delta",
+                                serde_json::json!({
+                                    "type":"content_block_delta","index": self.block_index,
+                                    "delta": {"type":"input_json_delta","partial_json": args}
+                                }),
+                            ));
+                        }
                     } else if !args.is_empty() {
                         self.current_kind = "tool";
                         self.ensure_block("tool_use", out);
