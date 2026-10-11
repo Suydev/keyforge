@@ -552,8 +552,19 @@ async fn main() {
             }
         }
     }
-    let want_proxy = std::env::var("KEYFORGE_NO_PROXY").ok().as_deref() != Some("1");
-    upstream::proxy_pool().set_enabled(want_proxy && n_proxies > 0);
+    // Egress choice. The rotating free-proxy pool is unreliable enough that it
+    // breaks upstreams that work fine directly: the best entries need 0.5-3.4s
+    // just to complete CONNECT, and against opencode.ai every attempt failed while
+    // a direct request returned 200 — which the router could only see as a 404 HTML
+    // page (a web page, not a WAF challenge) and retried to the deadline.
+    //
+    // So proxies are OFF unless asked for. Set KEYFORGE_PROXY_POOL=1 to opt back
+    // in when the pool is genuinely better than direct for a given deployment;
+    // KEYFORGE_NO_PROXY=1 still forces direct and wins over the opt-in.
+    let proxy_opt_in = std::env::var("KEYFORGE_PROXY_POOL").ok().as_deref() == Some("1");
+    let no_proxy = std::env::var("KEYFORGE_NO_PROXY").ok().as_deref() == Some("1");
+    let want_proxy = proxy_opt_in && !no_proxy && n_proxies > 0;
+    upstream::proxy_pool().set_enabled(want_proxy);
 
     let port = config::port();
     let addr = SocketAddr::from((config::BIND_ADDR, port));
@@ -577,7 +588,14 @@ async fn main() {
     if upstream::proxy_pool().is_enabled() {
         println!("  egress     via {n_proxies} rotating proxies (LRU, direct fallback)");
     } else {
-        println!("  egress     direct (no proxies loaded or disabled)");
+        println!(
+            "  egress     direct{}",
+            if n_proxies > 0 {
+                " (proxy pool loaded but off; set KEYFORGE_PROXY_POOL=1 to enable)"
+            } else {
+                ""
+            }
+        );
     }
     println!("  dashboard  http://127.0.0.1:{port}/");
     println!("  anthropic  http://127.0.0.1:{port}/v1/messages");

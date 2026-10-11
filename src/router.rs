@@ -871,6 +871,123 @@ fn merge_fingerprint_tools_list(tools: Vec<serde_json::Value>) -> serde_json::Va
     serde_json::Value::Array(deduped)
 }
 
+/// Drain an upstream OpenAI SSE body and fold it into a single Anthropic
+/// Messages JSON object, for a caller that asked for `stream:false`.
+///
+/// zen refuses `stream:false` (403), so the wire format is always SSE. Returning
+/// that SSE text verbatim in a body that claims to be JSON is how a non-streaming
+/// client ends up parsing garbage. This reuses the same converter the streaming
+/// path uses and then accumulates the text, tool calls and usage into one message.
+async fn collect_sse_as_message(body: Incoming, model: &str) -> Result<Vec<u8>, String> {
+    use http_body_util::BodyExt;
+    // Collect the whole SSE body, then parse. Simpler than streaming and needs
+    // no StreamExt dependency: zen replies are short, and this path only serves
+    // callers that explicitly asked for stream:false, where buffering is exactly
+    // what they want anyway.
+    let collected = body
+        .collect()
+        .await
+        .map_err(|_| "stream error".to_string())?
+        .to_bytes();
+    let raw = String::from_utf8_lossy(&collected);
+
+    let mut text = String::new();
+    let mut tool_calls: Vec<serde_json::Value> = Vec::new();
+    let mut stop_reason = "end_turn";
+    let (mut in_tok, mut out_tok) = (0u64, 0u64);
+
+    for line in raw.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix("data:") else {
+            continue;
+        };
+        let rest = rest.trim();
+        if rest == "[DONE]" {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(rest) else {
+            continue;
+        };
+        if let Some(u) = v.get("usage").filter(|u| !u.is_null()) {
+            in_tok = u.get("prompt_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
+            out_tok = u
+                .get("completion_tokens")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(0);
+        }
+        let Some(choice) = v.pointer("/choices/0") else {
+            continue;
+        };
+        if let Some(fr) = choice.get("finish_reason").and_then(|f| f.as_str()) {
+            if !fr.is_empty() && fr != "null" {
+                stop_reason = match fr {
+                    "tool_calls" | "function_call" => "tool_use",
+                    "length" => "max_tokens",
+                    _ => "end_turn",
+                };
+            }
+        }
+        let delta = choice.get("delta");
+        if let Some(d) = delta {
+            let a = d.get("content").and_then(|c| c.as_str()).unwrap_or("");
+            let b = d
+                .get("reasoning_content")
+                .and_then(|c| c.as_str())
+                .unwrap_or("");
+            text.push_str(b);
+            text.push_str(a);
+        }
+        if let Some(calls) = delta
+            .and_then(|d| d.get("tool_calls"))
+            .and_then(|c| c.as_array())
+        {
+            for tc in calls {
+                let f = tc.get("function");
+                let id = tc.get("id").and_then(|i| i.as_str()).unwrap_or("");
+                let name = f
+                    .and_then(|f| f.get("name"))
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("");
+                let args = f
+                    .and_then(|f| f.get("arguments"))
+                    .and_then(|a| a.as_str())
+                    .unwrap_or("{}");
+                if !name.is_empty() {
+                    tool_calls.push(serde_json::json!({
+                        "id": if id.is_empty() { format!("toolu_{}", tool_calls.len()) } else { id.to_string() },
+                        "type": "tool_use",
+                        "name": name,
+                        "input": serde_json::from_str::<serde_json::Value>(args)
+                            .unwrap_or(serde_json::json!({})),
+                    }));
+                }
+            }
+        }
+    }
+
+    let mut content: Vec<serde_json::Value> = Vec::new();
+    if !text.trim().is_empty() {
+        content.push(serde_json::json!({"type":"text","text": text}));
+    }
+    content.extend(tool_calls.clone());
+    let stop = if !tool_calls.is_empty() {
+        "tool_use"
+    } else {
+        stop_reason
+    };
+    let msg = serde_json::json!({
+        "id": format!("msg_{}", model.replace(['/', '-', ':'], "_")),
+        "type": "message",
+        "role": "assistant",
+        "model": model,
+        "content": content,
+        "stop_reason": stop,
+        "stop_sequence": serde_json::Value::Null,
+        "usage": {"input_tokens": in_tok, "output_tokens": out_tok},
+    });
+    serde_json::to_vec(&msg).map_err(|e| e.to_string())
+}
+
 /// Pull `usage` out of a non-streaming reply so spend and tokens are exact.
 fn parse_usage(body: &[u8]) -> (f64, u64, u64) {
     let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
@@ -1650,10 +1767,14 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
                     }
                     maybe_wasted.clear();
                     // zen always replies with an upstream SSE stream (we force
-                    // stream:true), even when the caller asked for stream:false. So
-                    // the reply is a stream whenever the CALLER wanted one OR zen
-                    // produced one; otherwise a caller that asked for non-streaming
-                    // would receive raw SSE text in a JSON body.
+                    // stream:true), because zen's free tier refuses stream:false
+                    // with 403. So the wire format is ALWAYS a stream for zen.
+                    // What the CALLER asked for still decides what we hand back:
+                    // a caller that wanted a stream gets the converted stream, and
+                    // a caller that asked for stream:false gets the stream
+                    // aggregated into one JSON message rather than raw SSE text
+                    // in a body that claims to be JSON.
+                    let caller_wants_stream = streaming;
                     let reply_is_streaming = streaming || zen;
                     if reply_is_streaming {
                         app.inflight_phase(
@@ -1680,9 +1801,47 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
                             0,
                             0,
                         );
-                        // A zen reply is OpenAI-shaped; an Anthropic client needs the
-                        // converted stream. Everything else passes through untouched.
+                        // A zen reply is OpenAI-shaped; an Anthropic client needs the converted
+                        // stream. Everything else passes through untouched.
                         let zen_reply = zen && route.flavor == crate::config::ApiFlavor::Anthropic;
+
+                        // A stream:false caller still gets an SSE wire format from
+                        // zen, so it must be folded back into one JSON message.
+                        // Collected here (zen only) rather than streaming.
+                        if zen_reply && !caller_wants_stream {
+                            let collected = match collect_sse_as_message(head.body, &model).await {
+                                Ok(c) => c,
+                                Err(e) => {
+                                    errors.push(format!("{provider_id}: body read failed: {e}"));
+                                    app.note_provider_fail(provider_id);
+                                    transient = true;
+                                    break;
+                                }
+                            };
+                            let (cost, in_tok, out_tok) = parse_usage(&collected);
+                            app.record_request(
+                                fp,
+                                label,
+                                provider_id,
+                                &key,
+                                &model,
+                                true,
+                                head.latency_ms,
+                                head.bytes_up,
+                                collected.len() as u64,
+                                cost,
+                                in_tok,
+                                out_tok,
+                            );
+                            let mut resp = Response::new(full(collected));
+                            *resp.status_mut() = StatusCode::OK;
+                            resp.headers_mut().insert(
+                                hyper::header::CONTENT_TYPE,
+                                hyper::header::HeaderValue::from_static("application/json"),
+                            );
+                            return resp;
+                        }
+
                         let mut resp = Response::new(if zen_reply {
                             pipe_openai_as_anthropic(head.body, &model)
                         } else {
