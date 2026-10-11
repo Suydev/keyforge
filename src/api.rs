@@ -439,7 +439,18 @@ pub async fn verify_and_add(app: &Arc<App>, key: &str) -> Value {
         .any(|p| key.starts_with(p.as_str()))
         || key.len() < crate::config::key_min_len()
     {
-        return json!({ "ok": false, "error": "key does not match a configured prefix" });
+        // zen is exempt: it does not validate Authorization and its key is the
+        // literal placeholder `public`, which fails the prefix/length gate. Without
+        // this, zen can never be adopted through the dashboard either.
+        let any_zen = app
+            .providers
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .any(|p| crate::config::is_zen_host(p.host));
+        if !(any_zen && !key.is_empty()) {
+            return json!({ "ok": false, "error": "key does not match a configured prefix" });
+        }
     }
     if app.lock().keys.contains_key(key) {
         return json!({ "ok": false, "error": "key already in the pool", "duplicate": true });

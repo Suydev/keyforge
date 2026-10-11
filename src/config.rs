@@ -184,6 +184,18 @@ pub fn head_size_safety() -> f64 {
     env_f64("KEYFORGE_HEAD_SIZE_SAFETY", HEAD_BUDGET_SIZE_SAFETY)
 }
 
+/// Is this provider host OpenCode Zen?
+///
+/// Zen is special in three ways that the rest of this file has to know about:
+/// it serves only `/zen/v1/chat/completions`, it returns no useful `/v1/models`,
+/// and it does not validate `Authorization` at all — a request with the key
+/// omitted is answered exactly like one carrying `Bearer public`. The router uses
+/// this to re-point the path and inject the client fingerprint; key loading uses
+/// it to stop rejecting zen's literal placeholder key.
+pub fn is_zen_host(host: &str) -> bool {
+    host.contains("opencode.ai")
+}
+
 /// Key validation: prefix and minimum length. A key is only accepted if it
 /// starts with KEY_PREFIX and is at least KEY_MIN_LEN characters long.
 pub const KEY_PREFIX: &str = "sk-";
@@ -215,6 +227,21 @@ pub fn key_prefixes() -> Vec<String> {
 
 pub fn key_min_len() -> usize {
     env_u64("KEYFORGE_KEY_MIN_LEN", KEY_MIN_LEN as u64) as usize
+}
+
+/// Minimum key length for this provider.
+///
+/// zen serves its free tier without validating the key, and its key file holds
+/// the literal placeholder `public` (six characters, no `sk-` prefix). Holding it
+/// to the generic 20-character minimum loaded an empty pool, which made the whole
+/// provider unreachable in a way that looked like a routing bug. Any non-empty
+/// key is accepted for a zen host.
+pub fn min_len_for(host: &str) -> usize {
+    if is_zen_host(host) {
+        0
+    } else {
+        key_min_len()
+    }
 }
 ///
 /// This is a provider-wide outage with a healthy host: new-api answered, the

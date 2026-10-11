@@ -494,6 +494,18 @@ pub fn classify_http(status: u16, headers_blob: &str, body: &str) -> Classified 
     // request for hours on an error that would never succeed.
     let json_body = trimmed.starts_with('{') || trimmed.starts_with('[');
     if looks_html || (cf_marker && !json_body) {
+        // A 404 HTML page is a wrong-URL signal, not a transient egress problem.
+        // On opencode.ai specifically, `/v1/messages` returns the site itself,
+        // so classifying that as Waf made the router treat a permanent error as
+        // retryable and spin to the deadline (minutes of silence for the client)
+        // instead of surfacing it. Route it as a client error so it is returned
+        // promptly; genuine CDN challenges are 403, which stays Waf below.
+        if status == 404 {
+            return Classified::of(
+                ErrClass::Client,
+                "not found (404) - wrong path for this provider, not a retryable egress fault",
+            );
+        }
         return Classified::of(
             ErrClass::Waf,
             if status == 403 {

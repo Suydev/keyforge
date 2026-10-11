@@ -118,7 +118,9 @@ mod oai2ant {
         pub buf: String,
         /// Anthropic has already emitted message_start.
         pub started: bool,
-        /// Anthropic content_block_start has been emitted.
+        /// index of the currently-open content block (Anthropic indexes from 0).
+        pub block_index: u64,
+        /// Whether a content_block_start has been emitted and not yet closed.
         pub block_open: bool,
         pub model: String,
         pub msg_id: String,
@@ -126,6 +128,12 @@ mod oai2ant {
         /// Cumulative output_tokens from the upstream usage chunk, flushed as
         /// message_delta in finish() so it lands AFTER content_block_stop.
         pub pending_usage: u64,
+        /// stop_reason carried by the upstream finish_reason, mapped to
+        /// Anthropic's vocabulary ("tool_use" / "max_tokens" / "end_turn").
+        pub stop_reason: String,
+        /// Which kind of block is currently open: "text" or "tool". Drives the
+        /// block-boundary transitions when content and tool_calls interleave.
+        pub current_kind: &'static str,
     }
 
     impl OaiToAnthropic {
@@ -134,6 +142,42 @@ mod oai2ant {
                 "event: {event}\ndata: {}\n\n",
                 serde_json::to_string(&data).unwrap_or_default()
             ))
+        }
+
+        /// Close the currently-open content block, if any. Mirrors the reference
+        /// converter's `_close_current_block`: a block is closed exactly once,
+        /// right before the next block starts or before message_delta.
+        fn close_block(&mut self, out: &mut Vec<u8>) {
+            if self.block_open {
+                out.extend_from_slice(&self.ev(
+                    "content_block_stop",
+                    serde_json::json!({"type":"content_block_stop","index": self.block_index}),
+                ));
+                self.block_open = false;
+                self.block_index += 1;
+            }
+        }
+
+        /// Open a block of the given type if none is open. Used when the content
+        /// type transitions (text <-> tool_use) so each type gets its own block.
+        fn ensure_block(&mut self, kind: &str, out: &mut Vec<u8>) {
+            if self.block_open {
+                return;
+            }
+            self.block_open = true;
+            let cb = match kind {
+                "tool_use" => serde_json::json!({
+                    "type":"tool_use","id":format!("toolu_{}", self.block_index),"name":"","input":{}
+                }),
+                _ => serde_json::json!({"type":"text","text":""}),
+            };
+            out.extend_from_slice(&self.ev(
+                "content_block_start",
+                serde_json::json!({
+                    "type":"content_block_start","index": self.block_index,
+                    "content_block": cb
+                }),
+            ));
         }
 
         /// Convert one complete upstream SSE line (no trailing newline) into zero
@@ -174,10 +218,34 @@ mod oai2ant {
                     }),
                 ));
             }
+            // usage capture first: a usage-only terminator has `choices: []` and would fall
+            // past the choice branch below, so reading usage after that branch made
+            // it unreachable for the exact chunk shape OpenAI specifies.
+            if let Some(u) = v.get("usage").filter(|u| !u.is_null()) {
+                self.pending_usage = u
+                    .get("completion_tokens")
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(0);
+            }
             let Some(choice) = v.pointer("/choices/0").and_then(|c| c.as_object()) else {
                 return;
             };
+            // finish_reason maps onto Anthropic's stop vocabulary; hardcoding
+            // "end_turn" made a tool-using turn look complete with nothing to run.
+            if let Some(fr) = choice.get("finish_reason").and_then(|f| f.as_str()) {
+                if !fr.is_empty() && fr != "null" {
+                    self.stop_reason = match fr {
+                        "tool_calls" | "function_call" => "tool_use",
+                        "length" => "max_tokens",
+                        _ => "end_turn",
+                    }
+                    .to_string();
+                }
+            }
             let delta = choice.get("delta");
+            // Text (and zen's reasoning_content, folded in: the free tier is
+            // reasoning-first and sends no signature, so a real thinking block
+            // would be invalid Anthropic).
             let text = delta
                 .and_then(|d| {
                     let a = d.get("content").and_then(|c| c.as_str()).unwrap_or("");
@@ -194,40 +262,65 @@ mod oai2ant {
                 })
                 .unwrap_or_default();
             if !text.is_empty() {
-                if !self.block_open {
-                    self.block_open = true;
-                    out.extend_from_slice(&self.ev(
-                        "content_block_start",
-                        serde_json::json!({
-                            "type": "content_block_start", "index": 0,
-                            "content_block": {"type": "text", "text": ""}
-                        }),
-                    ));
+                // A tool block may already be open; text reopens its own block.
+                if self.block_open && self.current_kind == "tool" {
+                    self.close_block(out);
                 }
+                self.current_kind = "text";
+                self.ensure_block("text", out);
                 out.extend_from_slice(&self.ev(
                     "content_block_delta",
                     serde_json::json!({
-                        "type": "content_block_delta", "index": 0,
+                        "type": "content_block_delta", "index": self.block_index,
                         "delta": {"type": "text_delta", "text": text}
                     }),
                 ));
             }
-            // usage arrives on the final chunk (stream_options.include_usage).
-            // Anthropic's message_delta carries CUMULATIVE output_tokens only --
-            // input_tokens belongs to message_start, not the delta. The spec says
-            // to mirror that, so a client accumulating usage sees the same
-            // numbers it would from api.anthropic.com.
-            //
-            // Buffered, NOT emitted here: the required order is
-            // content_block_stop -> message_delta -> message_stop, and usage
-            // arrives before the stream ends. finish() flushes it in the right
-            // slot, so a client accumulating on content_block_stop does not see
-            // message_delta first and drop the block.
-            if let Some(u) = v.get("usage").filter(|u| !u.is_null()) {
-                self.pending_usage = u
-                    .get("completion_tokens")
-                    .and_then(|x| x.as_u64())
-                    .unwrap_or(0);
+            // tool_calls: a delta with an `id` opens a new tool_use block; a delta
+            // with only `arguments` streams input_json_delta into the open one.
+            if let Some(calls) = delta
+                .and_then(|d| d.get("tool_calls"))
+                .and_then(|c| c.as_array())
+            {
+                for tc in calls {
+                    let id = tc.get("id").and_then(|i| i.as_str()).unwrap_or("");
+                    let func = tc.get("function");
+                    let name = func
+                        .and_then(|f| f.get("name"))
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("");
+                    let args = func
+                        .and_then(|f| f.get("arguments"))
+                        .and_then(|a| a.as_str())
+                        .unwrap_or("");
+                    if !id.is_empty() {
+                        // New tool call: close the previous block, open tool_use.
+                        if self.block_open && self.current_kind != "tool" {
+                            self.close_block(out);
+                        } else if self.block_open && self.current_kind == "tool" {
+                            self.close_block(out);
+                        }
+                        self.current_kind = "tool";
+                        self.ensure_block("tool_use", out);
+                        out.extend_from_slice(&self.ev(
+                            "content_block_start",
+                            serde_json::json!({
+                                "type":"content_block_start","index": self.block_index,
+                                "content_block": {"type":"tool_use","id": id,"name": name,"input":{}}
+                            }),
+                        ));
+                    } else if !args.is_empty() {
+                        self.current_kind = "tool";
+                        self.ensure_block("tool_use", out);
+                        out.extend_from_slice(&self.ev(
+                            "content_block_delta",
+                            serde_json::json!({
+                                "type":"content_block_delta","index": self.block_index,
+                                "delta": {"type":"input_json_delta","partial_json": args}
+                            }),
+                        ));
+                    }
+                }
             }
         }
 
@@ -253,28 +346,23 @@ mod oai2ant {
                 ));
             }
             if self.block_open {
-                self.block_open = false;
-                out.extend_from_slice(&self.ev(
-                    "content_block_stop",
-                    serde_json::json!({"type": "content_block_stop", "index": 0}),
-                ));
+                self.close_block(out);
             }
             // message_delta sits between content_block_stop and message_stop, and
-            // carries cumulative output_tokens only.
+            // carries cumulative output_tokens only. stop_reason is whatever the
+            // upstream finish_reason mapped to, so a tool turn reports "tool_use".
             out.extend_from_slice(&self.ev(
                 "message_delta",
                 serde_json::json!({
                     "type": "message_delta",
-                    "delta": {"stop_reason": "end_turn", "stop_sequence": null},
+                    "delta": {"stop_reason": self.stop_reason, "stop_sequence": null},
                     "usage": {"output_tokens": self.pending_usage}
                 }),
             ));
-            if !self.stopped {
-                out.extend_from_slice(
-                    &self.ev("message_stop", serde_json::json!({"type": "message_stop"})),
-                );
-                self.stopped = true;
-            }
+            out.extend_from_slice(
+                &self.ev("message_stop", serde_json::json!({"type": "message_stop"})),
+            );
+            self.stopped = true;
         }
     }
 
@@ -301,9 +389,18 @@ mod oai2ant {
                             let b = Bytes::from(std::mem::take(&mut pending));
                             return Poll::Ready(Some(Ok(Frame::data(b))));
                         }
+                        // More bytes may still be buffered: loop again.
                     }
-                    Poll::Ready(Some(Err(_))) => break,
-                    Poll::Ready(None) | Poll::Pending => break,
+                    Poll::Ready(Some(Err(_))) => {
+                        self.done = true;
+                        break;
+                    }
+                    Poll::Ready(None) => break,
+                    // Pending is the NORMAL state of a live SSE socket between
+                    // tokens, not end-of-stream. Treating it as EOF closed the
+                    // Anthropic message at the first socket gap, so every reply
+                    // lost its tail and later deltas arrived after message_stop.
+                    Poll::Pending => return Poll::Pending,
                 }
             }
             if !self.done {
@@ -312,7 +409,12 @@ mod oai2ant {
                 let tail = std::mem::take(&mut self.buf);
                 self.convert_line(&tail, &mut pending);
                 self.finish(&mut pending);
-                return Poll::Ready(Some(Ok(Frame::data(Bytes::from(pending)))));
+                // finish() is a no-op once the upstream already sent [DONE], so
+                // pending can legitimately be empty here. Emitting a zero-length
+                // frame anyway looks like a truncated stream to some SSE readers.
+                if !pending.is_empty() {
+                    return Poll::Ready(Some(Ok(Frame::data(Bytes::from(pending)))));
+                }
             }
             Poll::Ready(None)
         }
@@ -334,6 +436,7 @@ fn pipe_openai_as_anthropic(body: Incoming, model: &str) -> Body {
         done: false,
         buf: String::new(),
         started: false,
+        block_index: 0,
         block_open: false,
         model: model.to_string(),
         msg_id: if safe.is_empty() {
@@ -343,6 +446,8 @@ fn pipe_openai_as_anthropic(body: Incoming, model: &str) -> Body {
         },
         stopped: false,
         pending_usage: 0,
+        stop_reason: "end_turn".to_string(),
+        current_kind: "",
     }
     .boxed()
 }
@@ -479,9 +584,10 @@ fn body_targets_zen(body: &[u8]) -> bool {
 }
 
 /// Is this provider host OpenCode Zen? Keyed on the host, so it stays correct even
-/// when the caller named a model that does not look free.
+/// when the caller named a model that does not look free. Delegates to
+/// `config::is_zen_host`, which also documents why zen is special.
 fn is_zen_host(host: &str) -> bool {
-    host.contains("opencode.ai")
+    crate::config::is_zen_host(host)
 }
 
 /// Fingerprint tools zen's gate requires on the wire.
@@ -510,52 +616,256 @@ const ZEN_FINGERPRINT_TOOLS: [(&str, &str); 4] = [
     ),
 ];
 
-/// Reshape a request body into the form zen's free tier accepts: `stream` forced
-/// true, and all four fingerprint tools present.
+/// Translate an Anthropic Messages request into the OpenAI chat.completions shape
+/// zen's free tier accepts, and add the fingerprint zen's gate requires.
 ///
-/// Unparseable or non-object bodies pass through untouched — a body zen rejects
-/// for shape is one it would reject anyway, and rewriting it blind could break a
-/// caller that does not speak to zen at all.
+/// zen serves only the OpenAI route, so an Anthropic body must be converted, not
+/// merely reshaped. What this does, in order:
+///   - `stream` forced true (zen 403s otherwise) and `stream_options.include_usage`
+///     set, so token accounting works instead of silently reporting zero.
+///   - a top-level Anthropic `system` folded in as a leading system message.
+///   - message content blocks flattened to OpenAI strings, with `tool_use` turns
+///     become `tool_calls` and `tool_result` blocks become `role:"tool"` messages.
+///   - Anthropic tools `{name, input_schema}` become OpenAI
+///     `{type:"function", function:{...}}`, then the four fingerprint tools are
+///     appended if missing (zen's gate needs `bash` and `read`; `glob`/`grep` are
+///     optional but the reference sends all four, so we do too). Duplicate tool
+///     names are dropped, because zen 400s on them.
+///
+/// A body that is not a JSON object, or is already OpenAI-shaped, is left alone —
+/// rewriting blind could break a caller that does not speak to zen.
 fn zen_shape_body(body: &[u8]) -> Vec<u8> {
-    let Ok(mut v) = serde_json::from_slice::<serde_json::Value>(body) else {
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
         return body.to_vec();
     };
-    let Some(obj) = v.as_object_mut() else {
+    let Some(obj_in) = v.as_object() else {
         return body.to_vec();
     };
-    obj.insert("stream".into(), serde_json::Value::Bool(true));
 
-    let mut names: Vec<String> = Vec::new();
-    if let Some(tools) = obj.get("tools").and_then(|t| t.as_array()) {
-        for t in tools {
-            if let Some(n) = t
-                .get("function")
+    // Already OpenAI? Leave it: zen clients (opencode itself) send this shape and
+    // it works. Only an Anthropic body needs translating.
+    let looks_anthropic = obj_in.contains_key("messages")
+        && (obj_in.contains_key("system") || tools_are_anthropic(obj_in));
+    if !looks_anthropic {
+        // Still force the gate fields on an OpenAI body.
+        let mut o = obj_in.clone();
+        o.insert("stream".into(), serde_json::Value::Bool(true));
+        o.insert(
+            "stream_options".into(),
+            serde_json::json!({"include_usage": true}),
+        );
+        o.insert("tools".into(), merge_fingerprint_tools(o.get("tools")));
+        return serde_json::to_vec(&serde_json::Value::Object(o)).unwrap_or_else(|_| body.to_vec());
+    }
+
+    let mut messages: Vec<serde_json::Value> = Vec::new();
+    // Top-level Anthropic system -> leading OpenAI system message.
+    if let Some(sys) = obj_in.get("system") {
+        let text = anthropic_text(sys);
+        if !text.trim().is_empty() {
+            messages.push(serde_json::json!({"role":"system","content": text}));
+        }
+    }
+    for m in obj_in
+        .get("messages")
+        .and_then(|m| m.as_array())
+        .cloned()
+        .unwrap_or_default()
+    {
+        let role = m
+            .get("role")
+            .and_then(|r| r.as_str())
+            .unwrap_or("user")
+            .to_string();
+        let content = m.get("content").cloned();
+        let mut text = String::new();
+        let mut tool_calls: Vec<serde_json::Value> = Vec::new();
+        let mut tool_results: Vec<serde_json::Value> = Vec::new();
+        if let Some(blocks) = content.as_array() {
+            for b in blocks {
+                let ty = b.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                match ty {
+                    "text" => {
+                        if let Some(t) = b.get("text").and_then(|t| t.as_str()) {
+                            text.push_str(t);
+                        }
+                    }
+                    "thinking" => {}
+                    "tool_use" => {
+                        let id = b.get("id").and_then(|i| i.as_str()).unwrap_or("");
+                        let name = b.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                        let input = b.get("input").cloned().unwrap_or(serde_json::json!({}));
+                        tool_calls.push(serde_json::json!({
+                            "id": id, "type": "function",
+                            "function": {"name": name, "arguments": input.to_string()}
+                        }));
+                    }
+                    "tool_result" => {
+                        let tid = b.get("tool_use_id").and_then(|t| t.as_str()).unwrap_or("");
+                        let c =
+                            anthropic_text(b.get("content").unwrap_or(&serde_json::Value::Null));
+                        tool_results.push(
+                            serde_json::json!({"role":"tool","tool_call_id": tid, "content": c}),
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        } else if let Some(s) = content.as_ref().and_then(|c| c.as_str()) {
+            text.push_str(s);
+        }
+        // A turn that is only tool results becomes one role:"tool" message each.
+        if !tool_results.is_empty() {
+            messages.extend(tool_results);
+        }
+        let mut turn = serde_json::Map::new();
+        if !text.trim().is_empty() {
+            turn.insert("content".into(), serde_json::Value::String(text));
+        }
+        if !tool_calls.is_empty() {
+            turn.insert("tool_calls".into(), serde_json::Value::Array(tool_calls));
+        }
+        if turn.is_empty() {
+            // Preserve an empty turn as an empty assistant/user content so the
+            // alternation is not broken.
+            turn.insert("content".into(), serde_json::Value::String(String::new()));
+        }
+        turn.insert("role".into(), serde_json::Value::String(role));
+        messages.push(serde_json::Value::Object(turn));
+    }
+
+    let mut out = serde_json::Map::new();
+    for k in [
+        "model",
+        "max_tokens",
+        "temperature",
+        "top_p",
+        "stop",
+        "user",
+    ] {
+        if let Some(val) = obj_in.get(k) {
+            out.insert(k.to_string(), val.clone());
+        }
+    }
+    out.insert("messages".into(), serde_json::Value::Array(messages));
+    out.insert("stream".into(), serde_json::Value::Bool(true));
+    out.insert(
+        "stream_options".into(),
+        serde_json::json!({"include_usage": true}),
+    );
+    out.insert(
+        "tools".into(),
+        merge_fingerprint_tools(translated_tools(obj_in.get("tools"))),
+    );
+    serde_json::to_vec(&serde_json::Value::Object(out)).unwrap_or_else(|_| body.to_vec())
+}
+
+/// Flatten an Anthropic content value (string, or array of blocks) to text.
+fn anthropic_text(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(blocks) => blocks
+            .iter()
+            .filter_map(|b| {
+                if b.get("type").and_then(|t| t.as_str()) == Some("text") {
+                    b.get("text").and_then(|t| t.as_str()).map(str::to_string)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(""),
+        _ => String::new(),
+    }
+}
+
+/// Are these Anthropic tools (top-level `{name, input_schema}`) rather than OpenAI
+/// `{type:"function", function:{...}}`?
+fn tools_are_anthropic(obj: &serde_json::Map<String, serde_json::Value>) -> bool {
+    obj.get("tools")
+        .and_then(|t| t.as_array())
+        .map(|a| {
+            a.iter()
+                .any(|t| t.get("input_schema").is_some() && t.get("function").is_none())
+        })
+        .unwrap_or(false)
+}
+
+/// Anthropic tool definitions -> OpenAI function tools.
+fn translated_tools(v: Option<&serde_json::Value>) -> Vec<serde_json::Value> {
+    let Some(arr) = v.and_then(|t| t.as_array()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for t in arr {
+        // Already OpenAI-shaped: pass through.
+        if t.get("function").is_some() {
+            out.push(t.clone());
+            continue;
+        }
+        let name = t.get("name").and_then(|n| n.as_str()).unwrap_or("");
+        if name.is_empty() {
+            continue;
+        }
+        out.push(serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": t.get("description").and_then(|d| d.as_str()).unwrap_or(""),
+                "parameters": t.get("input_schema").cloned().unwrap_or(
+                    serde_json::json!({"type":"object","properties":{}})
+                )
+            }
+        }));
+    }
+    out
+}
+
+/// Append the fingerprint tools zen requires, if absent. Deduplicates by name:
+/// zen 400s on a duplicate tool name, and Claude Code sends `Bash`/`Read`/
+/// `Grep`/`Glob` (capitalised), which are different names from the lowercase
+/// stubs — so both end up on the wire, which is fine and what we want: the model
+/// can call the real tool and Claude Code can run it.
+fn merge_fingerprint_tools(existing: Option<&serde_json::Value>) -> serde_json::Value {
+    let mut out: Vec<serde_json::Value> = existing
+        .and_then(|t| t.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let names: Vec<String> = out
+        .iter()
+        .filter_map(|t| {
+            t.get("function")
                 .and_then(|f| f.get("name"))
                 .or_else(|| t.get("name"))
                 .and_then(|n| n.as_str())
-            {
-                names.push(n.to_string());
-            }
-        }
-    }
-    let missing: Vec<&(&str, &str)> = ZEN_FINGERPRINT_TOOLS
-        .iter()
-        .filter(|(n, _)| !names.iter().any(|x| x == n))
+                .map(str::to_string)
+        })
         .collect();
-    if !missing.is_empty() {
-        let mut tools = obj
-            .get("tools")
-            .and_then(|t| t.as_array())
-            .cloned()
-            .unwrap_or_default();
-        for (_, raw) in missing {
+    for (name, raw) in ZEN_FINGERPRINT_TOOLS.iter() {
+        if !names.iter().any(|n| n == name) {
             if let Ok(stub) = serde_json::from_str::<serde_json::Value>(raw) {
-                tools.push(stub);
+                out.push(stub);
             }
         }
-        obj.insert("tools".into(), serde_json::Value::Array(tools));
     }
-    serde_json::to_vec(&v).unwrap_or_else(|_| body.to_vec())
+    // Drop duplicates: keep the first occurrence of each tool name.
+    let mut seen: Vec<String> = Vec::new();
+    let mut deduped: Vec<serde_json::Value> = Vec::new();
+    for t in out {
+        let n = t
+            .get("function")
+            .and_then(|f| f.get("name"))
+            .or_else(|| t.get("name"))
+            .and_then(|n| n.as_str())
+            .unwrap_or("")
+            .to_string();
+        if n.is_empty() || seen.contains(&n) {
+            continue;
+        }
+        seen.push(n);
+        deduped.push(t);
+    }
+    serde_json::Value::Array(deduped)
 }
 
 /// Pull `usage` out of a non-streaming reply so spend and tokens are exact.
@@ -1336,7 +1646,13 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
                         app.note_wasted_timeout(w);
                     }
                     maybe_wasted.clear();
-                    if streaming {
+                    // zen always replies with an upstream SSE stream (we force
+                    // stream:true), even when the caller asked for stream:false. So
+                    // the reply is a stream whenever the CALLER wanted one OR zen
+                    // produced one; otherwise a caller that asked for non-streaming
+                    // would receive raw SSE text in a JSON body.
+                    let reply_is_streaming = streaming || zen;
+                    if reply_is_streaming {
                         app.inflight_phase(
                             flight,
                             provider_id,
@@ -1364,20 +1680,25 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
                         // A zen reply is OpenAI-shaped; an Anthropic client needs the
                         // converted stream. Everything else passes through untouched.
                         let zen_reply = zen && route.flavor == crate::config::ApiFlavor::Anthropic;
-                        let mut resp = if zen_reply {
-                            let b = pipe_openai_as_anthropic(head.body, &model);
-                            let mut r = Response::new(b);
-                            r.headers_mut().insert(
-                                hyper::header::CONTENT_TYPE,
-                                hyper::header::HeaderValue::from_static("text/event-stream"),
-                            );
-                            r
+                        let mut resp = Response::new(if zen_reply {
+                            pipe_openai_as_anthropic(head.body, &model)
                         } else {
-                            Response::new(pipe(head.body))
-                        };
+                            pipe(head.body)
+                        });
                         *resp.status_mut() =
                             StatusCode::from_u16(head.status).unwrap_or(StatusCode::OK);
                         copy_response_headers(&head.headers, resp.headers_mut());
+                        // AFTER copy: the upstream content-type for a zen reply is
+                        // the OpenAI one (text/event-stream), which is right for a
+                        // stream but wrong for a converted Anthropic stream — the
+                        // client needs the Anthropic media type. Set it last so it
+                        // is not overwritten by the upstream value.
+                        if zen_reply {
+                            resp.headers_mut().insert(
+                                hyper::header::CONTENT_TYPE,
+                                hyper::header::HeaderValue::from_static("text/event-stream"),
+                            );
+                        }
                         return resp;
                     }
 

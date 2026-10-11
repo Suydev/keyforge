@@ -592,22 +592,34 @@ impl App {
             let text = std::fs::read_to_string(&path).unwrap_or_default();
             let mut seen = std::collections::HashSet::new();
             let mut keys = Vec::new();
+            let zen = crate::config::is_zen_host(p.host);
             let prefixes = crate::config::key_prefixes();
-            let min_len = crate::config::key_min_len();
+            let min_len = crate::config::min_len_for(p.host);
             for line in text.lines() {
                 let k = line.trim();
+                if k.is_empty() {
+                    continue;
+                }
                 // Ignore comments/blank lines; require a configured key prefix so
                 // a stray README line can never become a "key".
                 //
                 // Use the same prefix set as verify_and_add. This used to read the
                 // single `key_prefix()`, so a deployment configured with
-                // KEYFORGE_KEY_PREFIXES loaded nothing from disk while pasting
-                // the same key through the dashboard succeeded - the two entry
-                // points disagreed about what a valid key looks like.
-                if prefixes.iter().any(|p| k.starts_with(p.as_str()))
-                    && k.len() >= min_len
-                    && seen.insert(k.to_string())
-                {
+                // KEYFORGE_KEY_PREFIXES loaded nothing from disk while pasting the
+                // same key through the dashboard succeeded - the two entry points
+                // disagreed about what a valid key looks like.
+                //
+                // zen is the exception. It does not validate Authorization at all
+                // (a request with the key omitted is answered like one carrying
+                // `Bearer public`), and its key file holds the literal placeholder
+                // `public` - six characters, no `sk-`. The generic gate rejected it,
+                // the provider loaded an empty pool, `provider_order_for` dropped it,
+                // and every zen model silently fell through to a provider that does
+                // not serve it. For a zen host any non-empty key is accepted.
+                let accepted = (prefixes.iter().any(|pre| k.starts_with(pre.as_str()))
+                    && k.len() >= min_len)
+                    || (zen && !k.is_empty());
+                if accepted && seen.insert(k.to_string()) {
                     keys.push(k.to_string());
                 }
             }
