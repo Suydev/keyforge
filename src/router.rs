@@ -681,7 +681,7 @@ fn zen_shape_body(body: &[u8]) -> Vec<u8> {
         let mut text = String::new();
         let mut tool_calls: Vec<serde_json::Value> = Vec::new();
         let mut tool_results: Vec<serde_json::Value> = Vec::new();
-        if let Some(blocks) = content.as_array() {
+        if let Some(blocks) = content.as_ref().and_then(|c| c.as_array()) {
             for b in blocks {
                 let ty = b.get("type").and_then(|t| t.as_str()).unwrap_or("");
                 match ty {
@@ -753,10 +753,8 @@ fn zen_shape_body(body: &[u8]) -> Vec<u8> {
         "stream_options".into(),
         serde_json::json!({"include_usage": true}),
     );
-    out.insert(
-        "tools".into(),
-        merge_fingerprint_tools(translated_tools(obj_in.get("tools"))),
-    );
+    let translated = translated_tools(obj_in.get("tools"));
+    out.insert("tools".into(), merge_fingerprint_tools_list(translated));
     serde_json::to_vec(&serde_json::Value::Object(out)).unwrap_or_else(|_| body.to_vec())
 }
 
@@ -827,10 +825,18 @@ fn translated_tools(v: Option<&serde_json::Value>) -> Vec<serde_json::Value> {
 /// stubs — so both end up on the wire, which is fine and what we want: the model
 /// can call the real tool and Claude Code can run it.
 fn merge_fingerprint_tools(existing: Option<&serde_json::Value>) -> serde_json::Value {
-    let mut out: Vec<serde_json::Value> = existing
-        .and_then(|t| t.as_array())
-        .cloned()
-        .unwrap_or_default();
+    merge_fingerprint_tools_list(
+        existing
+            .and_then(|t| t.as_array())
+            .cloned()
+            .unwrap_or_default(),
+    )
+}
+
+/// Append the fingerprint tools to an already-collected tool list, then drop
+/// duplicate names (zen 400s on them).
+fn merge_fingerprint_tools_list(tools: Vec<serde_json::Value>) -> serde_json::Value {
+    let mut out: Vec<serde_json::Value> = tools;
     let names: Vec<String> = out
         .iter()
         .filter_map(|t| {
