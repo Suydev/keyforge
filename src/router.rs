@@ -1180,7 +1180,7 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
                 } else {
                     route.flavor
                 };
-                let body_bytes = if zen {
+                let zen_body = if zen {
                     bytes::Bytes::from(zen_shape_body(&body_bytes))
                 } else {
                     body_bytes.clone()
@@ -1191,7 +1191,7 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
                     upstream_path,
                     &parts.method,
                     &parts.headers,
-                    body_bytes,
+                    zen_body,
                     &key,
                     upstream_flavor,
                     head_budget,
