@@ -181,9 +181,16 @@ mod oai2ant {
             let text = delta
                 .and_then(|d| {
                     let a = d.get("content").and_then(|c| c.as_str()).unwrap_or("");
-                    let b = d.get("reasoning_content").and_then(|c| c.as_str()).unwrap_or("");
+                    let b = d
+                        .get("reasoning_content")
+                        .and_then(|c| c.as_str())
+                        .unwrap_or("");
                     let s = format!("{b}{a}");
-                    if s.is_empty() { None } else { Some(s) }
+                    if s.is_empty() {
+                        None
+                    } else {
+                        Some(s)
+                    }
                 })
                 .unwrap_or_default();
             if !text.is_empty() {
@@ -263,10 +270,9 @@ mod oai2ant {
                 }),
             ));
             if !self.stopped {
-                out.extend_from_slice(&self.ev(
-                    "message_stop",
-                    serde_json::json!({"type": "message_stop"}),
-                ));
+                out.extend_from_slice(
+                    &self.ev("message_stop", serde_json::json!({"type": "message_stop"})),
+                );
                 self.stopped = true;
             }
         }
@@ -1164,9 +1170,21 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
                 // (`/v1/messages` there is a web page and answers 404 HTML,
                 // which used to be misread as a Cloudflare WAF block).
                 let zen = is_zen_host(provider.host);
-                let upstream_path = if zen { "/zen/v1/chat/completions" } else { route.path.as_str() };
-                let upstream_flavor = if zen { crate::config::ApiFlavor::OpenAi } else { route.flavor };
-                let body_bytes = if zen { zen_shape_body(&body_bytes) } else { body_bytes.clone() };
+                let upstream_path = if zen {
+                    "/zen/v1/chat/completions"
+                } else {
+                    route.path.as_str()
+                };
+                let upstream_flavor = if zen {
+                    crate::config::ApiFlavor::OpenAi
+                } else {
+                    route.flavor
+                };
+                let body_bytes = if zen {
+                    bytes::Bytes::from(zen_shape_body(&body_bytes))
+                } else {
+                    body_bytes.clone()
+                };
 
                 let attempt = upstream::send_head(
                     provider.host,

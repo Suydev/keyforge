@@ -14,8 +14,7 @@ pub const BROWSER_UA: &str =
 /// User-Agent the OpenCode CLI presents to zen. Its free tier rejects anything
 /// that does not look like the OpenCode client; an older version is answered
 /// with 426, a missing one with a 404 HTML page.
-pub const OPENCODE_UA: &str =
-    "opencode/1.18.18 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14";
+pub const OPENCODE_UA: &str = "opencode/1.18.18 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14";
 
 /// Session id in the exact shape zen's client gate accepts:
 /// `ses_` + 12 hex + 14 hex. A bare UUID-style id is refused with 403, and a
