@@ -294,12 +294,9 @@ mod oai2ant {
                         .and_then(|a| a.as_str())
                         .unwrap_or("");
                     if !id.is_empty() {
-                        // New tool call: close the previous block, open tool_use.
-                        if self.block_open && self.current_kind != "tool" {
-                            self.close_block(out);
-                        } else if self.block_open && self.current_kind == "tool" {
-                            self.close_block(out);
-                        }
+                        // New tool call: close whatever block was open (text or a
+                        // previous tool) and start a fresh tool_use block.
+                        self.close_block(out);
                         self.current_kind = "tool";
                         self.ensure_block("tool_use", out);
                         out.extend_from_slice(&self.ev(
