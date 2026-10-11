@@ -223,7 +223,9 @@ fn build_request(
         if host.contains("opencode.ai") {
             h.insert(
                 HeaderName::from_static("user-agent"),
-                HeaderValue::from_static(config::OPENCODE_UA),
+                HeaderValue::from_str(&crate::config::opencode_ua()).unwrap_or_else(|_| {
+                    HeaderValue::from_static(crate::config::OPENCODE_UA_FALLBACK)
+                }),
             );
             h.insert(
                 HeaderName::from_static("x-opencode-client"),

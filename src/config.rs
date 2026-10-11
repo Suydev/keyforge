@@ -12,13 +12,56 @@ pub const BROWSER_UA: &str =
      Chrome/131.0.0.0 Safari/537.36";
 
 /// User-Agent the OpenCode CLI presents to zen. Its free tier rejects anything
-/// that does not look like the OpenCode client; an older version is answered
-/// with 426, a missing one with a 404 HTML page.
-pub const OPENCODE_UA: &str = "opencode/1.18.18 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14";
+/// that does not look like the OpenCode client: an older version is answered
+/// with 426 Upgrade Required, and a non-client shape with 403 FreeTierError.
+/// (A 404 HTML page is a different thing entirely — that is the wrong *path*.)
+///
+/// The version is read from the installed `opencode` binary when it is present,
+/// so the UA tracks the real client instead of drifting against a hardcoded
+/// literal; the constant is the fallback.
+pub const OPENCODE_UA_FALLBACK: &str =
+    "opencode/1.19.0 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14";
 
-/// Session id in the exact shape zen's client gate accepts:
-/// `ses_` + 12 hex + 14 hex. A bare UUID-style id is refused with 403, and a
-/// reused pair is refused too, so this is generated per attempt.
+/// The OpenCode version to present, discovered from `~/.opencode/opencode` (or
+/// `opencode` on PATH) and falling back to [`OPENCODE_UA_FALLBACK`].
+///
+/// Reads the first `opencode/<semver>` literal out of the binary. Cheap, done
+/// once at startup, and avoids pinning a version that will silently go stale
+/// when the client auto-updates.
+fn opencode_version() -> String {
+    const BIN: &str = "/data/data/com.termux/files/home/.opencode/opencode";
+    // `strings`-equivalent without shelling out: scan the first megabytes for the
+    // literal. The banner lives near the front of the binary.
+    if let Ok(bytes) = std::fs::read(BIN) {
+        let window = &bytes[..bytes.len().min(1 << 20)];
+        let text = String::from_utf8_lossy(window);
+        if let Some(i) = text.find("opencode/") {
+            let rest = &text[i + "opencode/".len()..];
+            let ver: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || *c == '.')
+                .collect();
+            if !ver.is_empty() {
+                return ver;
+            }
+        }
+    }
+    // No binary to read: keep the working fallback.
+    "1.19.0".to_string()
+}
+
+/// The full User-Agent sent to zen for a zen host.
+pub fn opencode_ua() -> String {
+    format!(
+        "opencode/{} ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14",
+        opencode_version()
+    )
+}
+
+/// Session id in the exact shape zen's client gate accepts: `ses_` + 12 hex +
+/// 14 hex. A bare UUID-style id is refused with 403. (zen checks the SHAPE, not
+/// uniqueness: a reused or all-zero id is accepted, so this is generated fresh
+/// per attempt for safety, not because the gateway demands it.)
 pub fn opencode_session_id() -> String {
     format!("ses_{}{}", random_hex(12), random_hex(14))
 }
