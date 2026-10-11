@@ -207,6 +207,99 @@ fn is_stream(body: &[u8]) -> bool {
         .unwrap_or(false)
 }
 
+/// Does this request body look like it is aimed at OpenCode Zen?
+///
+/// A caller normally cannot say (it names a model, not a host), so the practical
+/// signal is the model itself: zen is the only provider here that serves the
+/// `-free` / `big-pickle` ids and the `opencode` provider id. Kept deliberately
+/// conservative — a false positive rewrites a body for an upstream that did not
+/// need it.
+fn body_targets_zen(body: &[u8]) -> bool {
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return false;
+    };
+    let model = v.get("model").and_then(|m| m.as_str()).unwrap_or("");
+    model.starts_with("opencode-public/")
+        || model.starts_with("opencode-zen/")
+        || model.starts_with("opencode/")
+        || model == "space-bunny-free"
+        || model.ends_with("-free")
+}
+
+/// Fingerprint tools zen's gate requires on the wire.
+///
+/// The gate advertises `bash`, `glob`, `grep` and `read`. A caller that already
+/// registers any of them keeps ITS definition (so the model calls the tool the
+/// agent can actually run); the rest are appended as minimal stubs. Appending
+/// only when missing is also what keeps the body free of duplicate names, which
+/// the gate rejects as well.
+const ZEN_FINGERPRINT_TOOLS: [(&str, &str); 4] = [
+    (
+        "bash",
+        r#"{"type":"function","function":{"name":"bash","description":"Run a shell command","parameters":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}}}"#,
+    ),
+    (
+        "glob",
+        r#"{"type":"function","function":{"name":"glob","description":"Find files matching a pattern","parameters":{"type":"object","properties":{"pattern":{"type":"string"}},"required":["pattern"]}}}"#,
+    ),
+    (
+        "grep",
+        r#"{"type":"function","function":{"name":"grep","description":"Search file contents for a pattern","parameters":{"type":"object","properties":{"pattern":{"type":"string"}},"required":["pattern"]}}}"#,
+    ),
+    (
+        "read",
+        r#"{"type":"function","function":{"name":"read","description":"Read a file","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}}"#,
+    ),
+];
+
+/// Reshape a request body into the form zen's free tier accepts: `stream` forced
+/// true, and all four fingerprint tools present.
+///
+/// Unparseable or non-object bodies pass through untouched — a body zen rejects
+/// for shape is one it would reject anyway, and rewriting it blind could break a
+/// caller that does not speak to zen at all.
+fn zen_shape_body(body: &[u8]) -> Vec<u8> {
+    let Ok(mut v) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return body.to_vec();
+    };
+    let Some(obj) = v.as_object_mut() else {
+        return body.to_vec();
+    };
+    obj.insert("stream".into(), serde_json::Value::Bool(true));
+
+    let mut names: Vec<String> = Vec::new();
+    if let Some(tools) = obj.get("tools").and_then(|t| t.as_array()) {
+        for t in tools {
+            if let Some(n) = t
+                .get("function")
+                .and_then(|f| f.get("name"))
+                .or_else(|| t.get("name"))
+                .and_then(|n| n.as_str())
+            {
+                names.push(n.to_string());
+            }
+        }
+    }
+    let missing: Vec<&(&str, &str)> = ZEN_FINGERPRINT_TOOLS
+        .iter()
+        .filter(|(n, _)| !names.iter().any(|x| x == n))
+        .collect();
+    if !missing.is_empty() {
+        let mut tools = obj
+            .get("tools")
+            .and_then(|t| t.as_array())
+            .cloned()
+            .unwrap_or_default();
+        for (_, raw) in missing {
+            if let Ok(stub) = serde_json::from_str::<serde_json::Value>(raw) {
+                tools.push(stub);
+            }
+        }
+        obj.insert("tools".into(), serde_json::Value::Array(tools));
+    }
+    serde_json::to_vec(&v).unwrap_or_else(|_| body.to_vec())
+}
+
 /// Pull `usage` out of a non-streaming reply so spend and tokens are exact.
 fn parse_usage(body: &[u8]) -> (f64, u64, u64) {
     let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
@@ -542,6 +635,20 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
 
     let model = model_of(&body_bytes);
     let streaming = is_stream(&body_bytes);
+    // OpenCode Zen needs a different body shape than a normal OpenAI-compatible
+    // upstream: stream MUST be true, and all four of bash/glob/grep/read must be
+    // advertised, or the gateway answers 404 HTML and this gets classified as a
+    // WAF block. The caller's own tools win; the fingerprint tools are appended
+    // only when missing, so a duplicate name (which the gate also rejects) is
+    // impossible. Applied to the body the router forwards; the response is
+    // demuxed back to the caller's original shape by the existing stream
+    // handling, and a non-streaming caller simply gets the collected reply.
+    let zen_provider = body_targets_zen(&body_bytes);
+    let body_bytes = if zen_provider {
+        bytes::Bytes::from(zen_shape_body(&body_bytes))
+    } else {
+        body_bytes
+    };
     let mut errors: Vec<String> = Vec::new();
     // Did this request only succeed because we rotated a key or changed provider?
     // Counted so the dashboard can show saves the user never had to see.

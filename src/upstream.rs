@@ -204,6 +204,46 @@ fn build_request(
             HeaderName::from_static("user-agent"),
             HeaderValue::from_static(config::BROWSER_UA),
         );
+        // ── OpenCode Zen client fingerprint ───────────────────────────────────
+        // zen (opencode.ai/zen) is not a plain OpenAI-compatible endpoint: it
+        // answers 404 HTML (or 403 FreeTierError) unless the request carries
+        // the OpenCode CLI's identity headers. Without this block every zen model
+        // failed, and the failure was misclassified as WAF because zen returns an
+        // HTML page rather than JSON.
+        //
+        // Required together, all of them or the gateway refuses:
+        //   user-agent            opencode/<v>=1.18 (older => 426)
+        //   x-opencode-session    ses_ + 12 hex + 14 hex (a bare UUID => 403)
+        //   x-opencode-request    msg_ + 12 hex + 14 hex
+        //   x-opencode-client     cli
+        //   x-opencode-project    global
+        // plus a body that sets stream:true and advertises all four of
+        // bash/glob/grep/read (added in router.rs). Session and request ids are
+        // fresh per attempt: the gate rejects duplicates of a used pair.
+        if host.contains("opencode.ai") {
+            h.insert(
+                HeaderName::from_static("user-agent"),
+                HeaderValue::from_static(config::OPENCODE_UA),
+            );
+            h.insert(
+                HeaderName::from_static("x-opencode-client"),
+                HeaderValue::from_static("cli"),
+            );
+            h.insert(
+                HeaderName::from_static("x-opencode-project"),
+                HeaderValue::from_static("global"),
+            );
+            h.insert(
+                HeaderName::from_static("x-opencode-session"),
+                HeaderValue::from_str(&config::opencode_session_id())
+                    .unwrap_or_else(|_| HeaderValue::from_static("")),
+            );
+            h.insert(
+                HeaderName::from_static("x-opencode-request"),
+                HeaderValue::from_str(&config::opencode_request_id())
+                    .unwrap_or_else(|_| HeaderValue::from_static("")),
+            );
+        }
         // No compression: keeps SSE readable and makes byte accounting real.
         h.insert(
             HeaderName::from_static("accept-encoding"),

@@ -11,6 +11,45 @@ pub const BROWSER_UA: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) \
      Chrome/131.0.0.0 Safari/537.36";
 
+/// User-Agent the OpenCode CLI presents to zen. Its free tier rejects anything
+/// that does not look like the OpenCode client; an older version is answered
+/// with 426, a missing one with a 404 HTML page.
+pub const OPENCODE_UA: &str =
+    "opencode/1.18.18 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14";
+
+/// Session id in the exact shape zen's client gate accepts:
+/// `ses_` + 12 hex + 14 hex. A bare UUID-style id is refused with 403, and a
+/// reused pair is refused too, so this is generated per attempt.
+pub fn opencode_session_id() -> String {
+    format!("ses_{}{}", random_hex(12), random_hex(14))
+}
+
+/// Request id in the shape the gate accepts: `msg_` + 12 hex + 14 hex.
+pub fn opencode_request_id() -> String {
+    format!("msg_{}{}", random_hex(12), random_hex(14).to_uppercase())
+}
+
+fn random_hex(n: usize) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    // Not cryptographic: these are per-attempt correlation ids the gateway only
+    // checks for shape, and a dependency-free clock+pid mix is enough entropy
+    // to keep concurrent attempts from colliding.
+    let mut state = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
+        ^ (std::process::id() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    let mut out = String::with_capacity(n);
+    while out.len() < n {
+        // xorshift64*: deterministic, no dependency, good enough dispersion.
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        out.push_str(&format!("{:016x}", state));
+    }
+    out[..n].to_string()
+}
+
 pub const DEFAULT_PORT: u16 = 8787;
 pub const BIND_ADDR: [u8; 4] = [127, 0, 0, 1]; // loopback only, never network-exposed
 
@@ -611,7 +650,7 @@ pub fn state_path() -> PathBuf {
             return PathBuf::from(p);
         }
     }
-    home().join(".config/tabi/gateway-state.json")
+    home().join(".config/keyforge/gateway-state.json")
 }
 
 pub fn keys_path(rel: &str) -> PathBuf {

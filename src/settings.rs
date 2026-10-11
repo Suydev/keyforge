@@ -275,7 +275,7 @@ impl Settings {
                 return PathBuf::from(p);
             }
         }
-        crate::config::home().join(".config/tabi/providers.json")
+        crate::config::home().join(".config/keyforge/providers.json")
     }
 
     /// Load, writing defaults if the file does not exist yet.
