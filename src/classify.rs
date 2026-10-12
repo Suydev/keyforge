@@ -49,8 +49,15 @@ pub struct Classified {
     pub remaining: Option<f64>,
     /// Required hold in USD, when the upstream told us.
     pub required: Option<f64>,
-    /// Retry-After in seconds, when present.
+    /// Retry-After in seconds, clamped to a key-safe maximum (see the 429 arm).
     pub retry_after: Option<u64>,
+    /// The upstream's retry-after verbatim, before any clamping. Only 429s
+    /// carry it. The clamped value protects a shared key's cooldown from a
+    /// hostile `Retry-After: 999999999999`; the raw value is what a caller
+    /// that cools something OTHER than the key (e.g. an egress IP, whose
+    /// budget genuinely resets on the upstream's window) is allowed to use,
+    /// and caps it on its own.
+    pub retry_after_raw: Option<u64>,
     /// Short human-readable summary for logs and the dashboard.
     pub detail: String,
 }
@@ -62,6 +69,7 @@ impl Classified {
             remaining: None,
             required: None,
             retry_after: None,
+            retry_after_raw: None,
             detail: detail.into(),
         }
     }
@@ -431,7 +439,7 @@ pub fn classify_http(status: u16, headers_blob: &str, body: &str) -> Classified 
         // key for 31 years — and survive a restart. 15 minutes is well beyond any
         // legitimate rate-limit window.
         const MAX_RETRY_AFTER: u64 = 900;
-        let retry_after = headers_blob
+        let raw_retry_after = headers_blob
             .split('\n')
             // Match the header exactly, not as a substring: `x-retry-after: 5`
             // must not be mistaken for the real header.
@@ -441,10 +449,14 @@ pub fn classify_http(status: u16, headers_blob: &str, body: &str) -> Classified 
                     .split(|c: char| !c.is_ascii_digit())
                     .next()
                     .and_then(|d| d.parse::<u64>().ok())
-            })
-            .map(|v| v.clamp(1, MAX_RETRY_AFTER));
+            });
+        let retry_after = raw_retry_after.map(|v| v.clamp(1, MAX_RETRY_AFTER));
         let mut c = Classified::of(ErrClass::Rate, "rate limited");
         c.retry_after = retry_after;
+        // Unclamped: a caller cooling a resource that genuinely follows the
+        // upstream's window (an egress IP, not the shared key) reads this and
+        // applies its own cap. The key cooldown keeps using the clamped value.
+        c.retry_after_raw = raw_retry_after;
         return c;
     }
 

@@ -127,6 +127,17 @@ pub struct SessionState {
     /// Which API surface it used: anthropic | openai.
     #[serde(default)]
     pub api: String,
+    /// Stable zen `ses_` id for this session. Keyforge mints one on first use
+    /// so a conversation keeps the same OpenCode "session" against zen; it is
+    /// dropped (and re-minted) when a zen free-usage 429 hits, because a fresh
+    /// session id is the cheap half of escaping that limit.
+    #[serde(default)]
+    pub zen_session_id: String,
+    /// Egress proxy IP this session's zen traffic last left from. Kept so a
+    /// conversation pins ONE address (one per-IP free budget) instead of LRU-
+    /// bouncing the whole pool. Cleared on a 429 from that address.
+    #[serde(default)]
+    pub zen_egress: String,
 }
 
 // ── metrics ─────────────────────────────────────────────────────────────────
@@ -555,8 +566,16 @@ impl App {
     pub fn reload_providers(&self) {
         let s = self.settings.lock().unwrap().clone();
         let new_providers = config::providers_from_settings(&s);
-        let mut prov = self.providers.write().unwrap();
-        *prov = new_providers;
+        {
+            let mut prov = self.providers.write().unwrap();
+            *prov = new_providers;
+        }
+        // A provider deleted from the settings must not survive as a ghost in the
+        // key pool, the runtime scoring map, or the loaded pools. This is the
+        // single chokepoint every provider-reload goes through (the settings
+        // watcher and the dashboard both land here), so pruning here covers all
+        // the places "remove a provider" used to leave behind.
+        self.prune_gone_providers();
         self.touch();
     }
 
@@ -582,10 +601,73 @@ impl App {
 
     // ── key files ───────────────────────────────────────────────────────────
 
+    /// Drop every trace of providers that no longer exist in the settings file.
+    ///
+    /// Removing a provider from `providers.json` (or the dashboard) deletes it
+    /// from `self.providers`, but this gateway also tracks per-provider state in
+    /// three other places that would keep the ghost alive:
+    ///   * `keys` — every `KeyState` whose `provider` id is gone,
+    ///   * `providers` (the runtime scoring map) — its `ProviderRuntime` row,
+    ///   * `pools` — the key list loaded from its file.
+    /// Without the prune, the dashboard still lists the old provider's keys, the
+    /// balance sweeper still probes them, and a re-added provider with the same
+    /// id would inherit stale cooldowns. Runs on every `load_key_files`, which
+    /// the settings watcher already triggers on change.
+    pub fn prune_gone_providers(&self) {
+        let live: std::collections::HashSet<&str> = self
+            .providers
+            .read()
+            .unwrap()
+            .iter()
+            .map(|p| p.id)
+            .collect();
+        let mut g = self.lock();
+        // Count what leaves so the caller can log it.
+        let before = g.keys.len();
+        g.keys.retain(|_, k| live.contains(k.provider.as_str()));
+        let after = g.keys.len();
+        let dropped_keys = before - after;
+        let before_p = g.providers.len();
+        g.providers.retain(|id, _| live.contains(id.as_str()));
+        let dropped_runtime = before_p - g.providers.len();
+        drop(g);
+        // The pools map is a separate lock.
+        let mut p = self.pools.lock().unwrap_or_else(|e| e.into_inner());
+        let before = p.len();
+        p.retain(|id, _| live.contains(id.as_str()));
+        let dropped_pools = before - p.len();
+        if dropped_keys > 0 || dropped_runtime > 0 || dropped_pools > 0 {
+            let ids: Vec<String> = self
+                .providers
+                .read()
+                .unwrap()
+                .iter()
+                .map(|x| x.id.to_string())
+                .collect();
+            self.event(
+                "info",
+                format!(
+                    "pruned providers no longer in settings ({} keys, {} runtime, {} pools; live: {})",
+                    dropped_keys,
+                    dropped_runtime,
+                    dropped_pools,
+                    ids.join(", ")
+                ),
+            );
+        }
+        self.touch();
+    }
+
     /// Load key files from disk, registering any new keys. Safe to call
     /// repeatedly (the GitHub sync helper does exactly that). Returns the number
     /// of newly-registered keys per provider.
     pub fn load_key_files(&self) -> Vec<(String, usize, usize)> {
+        // A provider removed from the settings file must disappear from every
+        // place the gateway knows about: its key rows, its runtime scoring row,
+        // and its pool. Without this, a deleted provider keeps its keys in the
+        // dashboard, in the state file, and in `candidates_for_probe` forever.
+        self.prune_gone_providers();
+
         let mut report = Vec::new();
         for p in &*self.providers.read().unwrap() {
             let path = config::keys_path(p.keys_file);
@@ -1239,6 +1321,17 @@ impl App {
     ///
     /// Pass `req_bytes = 0` when the size is genuinely unknown; the size term
     /// then vanishes and this degrades to the old EWMA-only behaviour.
+    /// Whether outbound traffic is currently able to egress through the rotating
+    /// proxy pool, so an attempt would actually be proxied.
+    ///
+    /// Used to pick the head budget: a proxied attempt gets the short
+    /// fast-fail budget (see `config::proxy_head_budget_secs`) because a dead
+    /// free proxy must be discovered and rotated past quickly, while a direct
+    /// attempt keeps the full modelled budget where waiting buys a real answer.
+    pub fn proxy_egress_in_play(&self) -> bool {
+        crate::upstream::proxy_pool().is_enabled() && crate::upstream::proxy_pool().len() > 0
+    }
+
     pub fn head_budget_secs(&self, provider: &str, req_bytes: u64) -> u64 {
         let g = self.lock();
         let (ewma, samples) = match g.providers.get(provider) {
@@ -1979,6 +2072,62 @@ impl App {
                 ),
             );
         }
+    }
+
+    /// This session's zen `ses_` id, minting one on first call.
+    ///
+    /// Minted (not read from the client) because zen's gate accepts the id by
+    /// SHAPE, not uniqueness — keyforge owns the value so it can be re-rolled
+    /// on a free-usage 429. Persisted on the session, so a resumed
+    /// conversation keeps its id across restarts.
+    pub fn zen_session_id(&self, fp: &str) -> String {
+        let mut g = self.lock();
+        let s = g
+            .sessions
+            .entry(fp.to_string())
+            .or_insert_with(|| SessionState {
+                created: config::now_secs(),
+                ..Default::default()
+            });
+        if s.zen_session_id.is_empty() {
+            s.zen_session_id = crate::config::opencode_session_id();
+        }
+        s.zen_session_id.clone()
+    }
+
+    /// Rotate the session's zen `ses_` id (after a free-usage 429): a fresh id
+    /// plus a fresh egress IP is the documented workaround for the limit.
+    pub fn rotate_zen_session(&self, fp: &str) -> String {
+        let mut g = self.lock();
+        if let Some(s) = g.sessions.get_mut(fp) {
+            s.zen_session_id = crate::config::opencode_session_id();
+            s.zen_session_id.clone()
+        } else {
+            crate::config::opencode_session_id()
+        }
+    }
+
+    /// This session's pinned zen egress IP, if one was recorded.
+    pub fn zen_egress(&self, fp: &str) -> Option<String> {
+        self.lock()
+            .sessions
+            .get(fp)
+            .filter(|s| !s.zen_egress.is_empty())
+            .map(|s| s.zen_egress.clone())
+    }
+
+    /// Record the egress IP a session's zen request just used. Empty string
+    /// clears the pin (used after a 429, so the next attempt takes a fresh IP).
+    pub fn set_zen_egress(&self, fp: &str, egress: &str) {
+        let mut g = self.lock();
+        let s = g
+            .sessions
+            .entry(fp.to_string())
+            .or_insert_with(|| SessionState {
+                created: config::now_secs(),
+                ..Default::default()
+            });
+        s.zen_egress = egress.to_string();
     }
 
     // ── persistence ─────────────────────────────────────────────────────────

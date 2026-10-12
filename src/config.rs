@@ -626,11 +626,130 @@ pub fn proxy_vet_concurrency() -> usize {
 pub const PROXY_VET_TIMEOUT_SECS: u64 = 12;
 
 pub fn proxy_vet_timeout_secs() -> u64 {
-    env_u64("KEYFORGE_PROXY_VET_TIMEOUT_SECS", PROXY_VET_TIMEOUT_SECS)
+    env_u64("KEYFORGE_PROXY_VET_TIMEOUT_SECS", PROXY_VET_TIMEOUT_SECS as u64)
+}
+
+/// Head budget allowed for ONE attempt when the request is egressing through
+/// the rotating proxy pool.
+///
+/// The normal budget is sized for a direct upstream: 120s default plus a size
+/// term, which is correct when the provider itself is slow but catastrophic when
+/// the slow party is a free proxy. A black-hole address then costs the full
+/// budget per attempt, and measured p90 head latency landed on the 170s ceiling
+/// while a direct request to the same host finished in 1.2s.
+///
+/// A proxy that has actually been verified (it streamed a real zen pong) answers
+/// in seconds, so a short budget here is a fast, honest test: a proxy that has
+/// not produced a head by now is dead, gets cooled and evicted, and the retry
+/// rotates to the next address instead of waiting. Direct egress is unaffected
+/// and keeps the full modelled budget.
+pub const PROXY_HEAD_BUDGET_SECS: u64 = 25;
+
+pub fn proxy_head_budget_secs() -> u64 {
+    env_u64("KEYFORGE_PROXY_HEAD_BUDGET_SECS", PROXY_HEAD_BUDGET_SECS as u64)
+}
+
+/// Timeout for a zen ping-vet: a real chat request through one proxy, awaiting
+/// the first SSE frame. Longer than a `/v1/models` probe because the free tier
+/// queues, but capped so a hung candidate cannot stall the refill batch.
+pub const ZEN_PING_TIMEOUT_SECS: u64 = 45;
+
+pub fn zen_ping_timeout_secs() -> u64 {
+    env_u64("KEYFORGE_ZEN_PING_TIMEOUT_SECS", ZEN_PING_TIMEOUT_SECS as u64)
 }
 
 pub fn proxy_maint_secs() -> u64 {
-    env_u64("KEYFORGE_PROXY_MAINT_SECS", PROXY_MAINT_SECS)
+    env_u64("KEYFORGE_PROXY_MAINT_SECS", PROXY_MAINT_SECS as u64)
+}
+
+/// Trust-all: every endpoint in the pool is pickable regardless of vetting
+/// state.
+///
+/// On by default now that the pool self-refills from a public list and new
+/// members are ping-vetted against zen: an unvetted IP costs one LRU slot
+/// and, if it is actually dead, three connect failures before eviction sheds
+/// it — so the pool cleans itself. `KEYFORGE_PROXY_TRUST_ALL=0` restores the
+/// vetted-only gate.
+pub fn proxy_trust_all() -> bool {
+    env_u64("KEYFORGE_PROXY_TRUST_ALL", 1) != 0
+}
+
+/// How candidates are vetted: `"ping"` (a real zen chat pong through the proxy)
+/// or `"models"` (a free `/v1/models` GET through it).
+///
+/// Unset default: ping whenever any configured provider is a zen host — that is
+/// the pool's whole purpose — otherwise the cheap models probe, which is all a
+/// non-zen deployment can vet against. `KEYFORGE_PROXY_VET_METHOD` forces
+/// either.
+pub fn proxy_vet_method() -> &'static str {
+    if let Ok(m) = std::env::var("KEYFORGE_PROXY_VET_METHOD") {
+        return if m.eq_ignore_ascii_case("models") {
+            "models"
+        } else {
+            "ping"
+        };
+    }
+    let (s, _) = crate::settings::Settings::load_or_init();
+    let has_zen = s.providers.iter().any(|p| {
+        p.enabled
+            && p.hosts
+                .iter()
+                .any(|h| h.enabled && is_zen_host(&h.host))
+    });
+    if has_zen {
+        "ping"
+    } else {
+        "models"
+    }
+}
+
+/// Route egress through the pool ONLY for the zen (opencode.ai) host.
+///
+/// The free-proxy pool exists to spread zen's per-IP free-tier limit across many
+/// addresses; it is actively harmful to the paid providers (vyceai, codecraftapi)
+/// because a free proxy that mangles TLS or gets WAF-blocked breaks an upstream
+/// that works perfectly direct. So when the pool is on, zen goes through it and
+/// everything else goes direct. `KEYFORGE_PROXY_ZEN_ONLY=0` restores the old
+/// "route every host through the pool" behaviour.
+pub fn proxy_zen_only() -> bool {
+    env_u64("KEYFORGE_PROXY_ZEN_ONLY", 1) != 0
+}
+
+/// The public proxy list the background downloader pulls to refill the pool.
+///
+/// proxifly/free-proxy-list (starred, updated every 5 min) is the default source;
+/// its raw `proxies/protocols/http/data.json` carries thousands of entries. The
+/// downloader normalises that shape into the ProxyScrape JSON the pool already
+/// parses, so no new ingest path is needed. Override with a full URL to point at
+/// a different source (must be public and https, or `file://` for an offline box).
+pub fn proxy_download_url() -> String {
+    std::env::var("KEYFORGE_PROXY_DOWNLOAD_URL").unwrap_or_else(|_| {
+        "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/http/data.json"
+            .to_string()
+    })
+}
+
+/// How often the downloader re-fetches the public list. 2h balances freshness
+/// against battery: free proxies decay within hours, so an older-than-2h pool is
+/// mostly dead anyway and a re-fetch is what refills it.
+pub const PROXY_DOWNLOAD_SECS: u64 = 2 * 3600;
+
+pub fn proxy_download_secs() -> u64 {
+    env_u64("KEYFORGE_PROXY_DOWNLOAD_SECS", PROXY_DOWNLOAD_SECS as u64)
+}
+
+/// Cap on a zen 429's egress-IP cooldown. The upstream `retry-after` for the
+/// shared free pool can be ~15h; cooling the address that long is correct (that
+/// IP's budget is genuinely spent), but an unvalidated huge value is a risk, so
+/// we bound the cooldown to this. The shared `public` KEY is never cooled this
+/// way — the limit is per-IP, so a fresh IP is the workaround, not a rested key.
+pub const ZEN_429_EGRESS_COOL_MAX_SECS: u64 = 2 * 3600;
+
+pub fn zen_429_egress_cool_max_secs() -> u64 {
+    env_u64(
+        "KEYFORGE_ZEN_429_EGRESS_COOL_MAX_SECS",
+        ZEN_429_EGRESS_COOL_MAX_SECS as u64,
+    )
 }
 
 /// Which API surface a request is using. Both are supported for every provider.

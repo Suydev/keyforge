@@ -157,6 +157,11 @@ const STRIP: &[&str] = &[
 ];
 
 /// Build the outbound request. Shared by the buffered and streaming paths.
+///
+/// `zen_session` pins the `x-opencode-session` value for zen hosts: keyforge
+/// mints one per conversation (see `App::zen_session_id`) instead of a fresh
+/// random id per attempt, and re-rolls it when zen's per-IP free-usage limit
+/// trips. `None` = generate a fresh one, the old behaviour.
 fn build_request(
     host: &str,
     path: &str,
@@ -165,6 +170,7 @@ fn build_request(
     body: Bytes,
     key: &str,
     flavor: ApiFlavor,
+    zen_session: Option<&str>,
 ) -> Result<Request<Full<Bytes>>, String> {
     // `host` comes from provider config, where it is natural to write
     // "https://example.com" (and the bundled defaults do). Formatting that
@@ -218,8 +224,10 @@ fn build_request(
         //   x-opencode-client     cli
         //   x-opencode-project    global
         // plus a body that sets stream:true and advertises all four of
-        // bash/glob/grep/read (added in router.rs). Session and request ids are
-        // fresh per attempt: the gate rejects duplicates of a used pair.
+        // bash/glob/grep/read (added in router.rs). The request id is fresh per
+        // attempt (the gate rejects a reused msg_ id); the SESSION id is sticky
+        // per conversation (keyforge pins it so a session keeps its OpenCode
+        // identity against zen) and re-rolled only when a free-usage 429 hits.
         if host.contains("opencode.ai") {
             h.insert(
                 HeaderName::from_static("user-agent"),
@@ -235,10 +243,15 @@ fn build_request(
                 HeaderName::from_static("x-opencode-project"),
                 HeaderValue::from_static("global"),
             );
+            // Sticky session: reuse the conversation's id when pinned; otherwise
+            // mint a fresh one (the old per-attempt behaviour).
+            let session_owned = match zen_session {
+                Some(s) => s.to_string(),
+                None => config::opencode_session_id(),
+            };
             h.insert(
                 HeaderName::from_static("x-opencode-session"),
-                HeaderValue::from_str(&config::opencode_session_id())
-                    .unwrap_or_else(|_| HeaderValue::from_static("")),
+                HeaderValue::from_str(&session_owned).unwrap_or_else(|_| HeaderValue::from_static("")),
             );
             h.insert(
                 HeaderName::from_static("x-opencode-request"),
@@ -324,6 +337,7 @@ pub async fn vet_proxy(
         Bytes::new(),
         key,
         ApiFlavor::OpenAi,
+        None,
     ) {
         Ok(r) => r,
         Err(e) => return Err(e),
@@ -349,6 +363,161 @@ pub async fn vet_proxy(
     }
 }
 
+/// Vet a proxy by running a real OpenCode-zen chat "pong" THROUGH it.
+///
+/// A `/v1/models` 200 proves the tunnel exists but not that the IP can carry a
+/// free-tier model call — Cloudflare fronts opencode.ai and rejects most free
+/// proxy ranges at the model layer even when CONNECT succeeds. Only a `200`
+/// chat reply with an SSE `data:` frame is accepted, which is the strongest
+/// signal that this egress IP has usable free-tier budget right now.
+///
+/// A `429 FreeUsageLimitError` (tunnel + fingerprint are fine, this IP's daily
+/// budget is spent) is NOT accepted as a pong: the IP is kept in the pool but
+/// not marked vetted, so the rotation still lands on it once its window
+/// resets rather than evicting a working address.
+///
+/// Returns `Ok(ms)` on a real pong, `Err(reason)` otherwise.
+pub async fn vet_zen_ping(proxy: &crate::proxy::ProxyEndpoint) -> Result<u64, String> {
+    let started = Instant::now();
+    let pool = std::sync::Arc::new(crate::proxy::ProxyPool::new());
+    pool.add_endpoints(vec![proxy.clone()]);
+    pool.set_enabled(true);
+    // Pin the throwaway pool to THIS endpoint so a single-candidate pick() can
+    // never bounce; the connector's LRU still names the egress.
+
+    let tls = tls_config();
+    let https = hyper_rustls::HttpsConnectorBuilder::new()
+        .with_tls_config(tls)
+        .https_only()
+        .enable_http1()
+        .wrap_connector(crate::proxy::ProxyConnector::new(pool));
+    let client: HttpsClient = Client::builder(hyper_util::rt::TokioExecutor::new())
+        .pool_max_idle_per_host(0)
+        .build(https);
+
+    // Minimal zen chat body: one gate model, the four fingerprint tools the free
+    // tier requires, tiny output. Reuses the router's zen shaping so the wire
+    // shape matches what a real request sends.
+    let body = crate::router::zen_ping_body();
+    let req = match build_request(
+        "opencode.ai",
+        "/zen/v1/chat/completions",
+        &Method::POST,
+        &HeaderMap::new(),
+        Bytes::from(body),
+        "public",
+        ApiFlavor::OpenAi,
+        None,
+    ) {
+        Ok(r) => r,
+        Err(e) => return Err(e),
+    };
+
+    let timeout = Duration::from_secs(config::zen_ping_timeout_secs());
+    let scoped = crate::proxy::PINNED_EGRESS.scope(
+        std::cell::RefCell::new(proxy.addr()),
+        crate::proxy::USED_EGRESS.scope(RefCell::new(None), async move {
+            let r = tokio::time::timeout(timeout, client.request(req)).await;
+            (r, crate::proxy::used_egress().unwrap_or_default())
+        }),
+    );
+    let (outcome, _) = scoped.await;
+
+    let resp = match outcome {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => return Err(flatten_err(e)),
+        Err(_) => {
+            return Err(format!(
+                "pong timed out after {}s",
+                config::zen_ping_timeout_secs()
+            ))
+        }
+    };
+
+    let status = resp.status().as_u16();
+    let collected = match resp.into_body().collect().await {
+        Ok(c) => c.to_bytes(),
+        Err(e) => return Err(format!("body read failed: {e}")),
+    };
+    let head = String::from_utf8_lossy(&collected[..collected.len().min(2048)]).to_string();
+
+    if (200..300).contains(&status) && head.contains("data:") {
+        Ok(started.elapsed().as_millis() as u64)
+    } else {
+        // 429 FreeUsageLimitError: the IP reaches zen and the fingerprint is
+        // accepted, but this address's free budget is spent for now. Report it
+        // distinctly so the caller can keep the endpoint un-vetted without
+        // evicting it.
+        if status == 429 && head.contains("FreeUsageLimitError") {
+            Err("pong: zen 429 FreeUsageLimitError (IP budget spent)".to_string())
+        } else {
+            Err(format!(
+                "pong: HTTP {status} — {}",
+                head.split_whitespace().take(6).collect::<Vec<_>>().join(" ")
+            ))
+        }
+    }
+}
+
+/// Direct (no-proxy) HTTPS GET for the background candidate downloader.
+///
+/// Reuses the SAME proven connector shape as [`client`] — `HttpsConnector`
+/// over a `ProxyConnector` bound to a **disabled** throwaway pool. A disabled
+/// pool makes `pick()` return `None`, so the connector does a plain direct
+/// TCP connect (no egress rotation). This is used instead of a bare
+/// `hyper_util` `HttpConnector` because that one is scheme-sensitive and
+/// rejects `https://` request URIs ("invalid URL, scheme is not http"),
+/// whereas `ProxyConnector` reads only host/port and ignores the scheme —
+/// which is exactly what the working `client()` relies on.
+pub async fn direct_get(url: &str, timeout: Duration) -> Result<Vec<u8>, String> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let tls = rustls::ClientConfig::builder()
+        .with_root_certificates(rustls::RootCertStore {
+            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+        })
+        .with_no_client_auth();
+    let pool = std::sync::Arc::new(crate::proxy::ProxyPool::new());
+    // Deliberately NOT enabled: a disabled pool forces direct TCP egress, so the
+    // download of the very pool that would serve future requests is not itself
+    // routed through those requests (and never needs one to reach GitHub).
+    let https = hyper_rustls::HttpsConnectorBuilder::new()
+        .with_tls_config(tls)
+        .https_only()
+        .enable_http1()
+        .wrap_connector(crate::proxy::ProxyConnector::new(pool));
+    let client: HttpsClient = Client::builder(hyper_util::rt::TokioExecutor::new())
+        .pool_max_idle_per_host(0)
+        .build(https);
+
+    let uri: hyper::Uri = url
+        .parse()
+        .map_err(|e| format!("bad download url: {e}"))?;
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri(uri)
+        .header("user-agent", "keyforge-proxy-downloader/1.0")
+        .header("accept", "application/json")
+        .body(Full::new(Bytes::new()))
+        .map_err(|e| format!("bad request: {e}"))?;
+
+    let resp = match tokio::time::timeout(timeout, client.request(req)).await {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => return Err(flatten_err(e)),
+        Err(_) => return Err(format!("download timed out after {}s", timeout.as_secs())),
+    };
+    if !(200..300).contains(&resp.status().as_u16()) {
+        return Err(format!(
+            "download HTTP {}",
+            resp.status().as_u16()
+        ));
+    }
+    resp.into_body()
+        .collect()
+        .await
+        .map(|c| c.to_bytes().to_vec())
+        .map_err(|e| format!("download body read failed: {e}"))
+}
+
 /// Send a request and return as soon as the response HEAD is available, leaving
 /// the body unread.
 ///
@@ -370,11 +539,22 @@ pub async fn send_head(
     key: &str,
     flavor: ApiFlavor,
     head_timeout: Duration,
+    zen_session: Option<&str>,
+    pinned_egress: Option<&str>,
 ) -> HeadAttempt {
     let started = Instant::now();
     let bytes_up = body.len() as u64;
 
-    let req = match build_request(host, path, method, client_headers, body, key, flavor) {
+    let req = match build_request(
+        host,
+        path,
+        method,
+        client_headers,
+        body,
+        key,
+        flavor,
+        zen_session,
+    ) {
         Ok(r) => r,
         Err(message) => {
             // Nothing was sent, so no egress was chosen.
@@ -396,9 +576,16 @@ pub async fn send_head(
     // the scope had already ended is why every one of 137 stored error records
     // carried `proxy: ""` — per-proxy blame was impossible even though the
     // proxies were demonstrably in use (direct access 403s at the WAF).
-    let scoped = crate::proxy::USED_EGRESS.scope(RefCell::new(None), async move {
-        let r = tokio::time::timeout(head_timeout, client().request(req)).await;
-        (r, crate::proxy::used_egress().unwrap_or_default())
+    //
+    // The egress pin rides in its own task-local so the connector's `pick()`
+    // honours it (a session stays on its own proxy IP); an empty string is the
+    // "no pin" case, and `pick()` falls through to normal LRU.
+    let pin = pinned_egress.unwrap_or("");
+    let scoped = crate::proxy::PINNED_EGRESS.scope(std::cell::RefCell::new(pin.to_string()), {
+        crate::proxy::USED_EGRESS.scope(RefCell::new(None), async move {
+            let r = tokio::time::timeout(head_timeout, client().request(req)).await;
+            (r, crate::proxy::used_egress().unwrap_or_default())
+        })
     });
     let (outcome, proxy) = scoped.await;
     let resp = match outcome {
@@ -452,7 +639,16 @@ pub async fn send(
     let started = Instant::now();
     let bytes_up = body.len() as u64;
 
-    let req = match build_request(host, path, method, client_headers, body, key, flavor) {
+    let req = match build_request(
+        host,
+        path,
+        method,
+        client_headers,
+        body,
+        key,
+        flavor,
+        None,
+    ) {
         Ok(r) => r,
         Err(message) => {
             return Attempt::Err {

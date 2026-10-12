@@ -349,6 +349,17 @@ pub fn evict_after_fails() -> u32 {
 /// refills itself; it just never routes through something unproven.
 ///
 /// `KEYFORGE_PROXY_REQUIRE_VETTED=0` restores the old try-anything behaviour.
+///
+/// Trust-all (`KEYFORGE_PROXY_TRUST_ALL`, the default) does NOT turn this gate
+/// off. The two settings answer different questions: trust-all says how many
+/// public-list IPs may be *considered* (all of them, as candidates to vet),
+/// while this gate says which of them may actually *carry traffic* — and the
+/// answer is only the ones that proved it by streaming a real zen pong.
+///
+/// Turning the gate off was actively harmful: LRU then walked through unvetted,
+/// mostly-dead proxies, each burning the full head budget on a CONNECT that
+/// never completed, so every request timed out while the pool reported healthy
+/// members. A verified-only pool is smaller but always works.
 pub fn require_vetted() -> bool {
     env_u64("KEYFORGE_PROXY_REQUIRE_VETTED", 1) != 0
 }
@@ -499,6 +510,11 @@ impl ProxyPool {
     }
 
     /// Pick the least-recently-used healthy proxy, or `None` to go direct.
+    ///
+    /// If this task has a pinned egress (a session's own IP, see
+    /// `PINNED_EGRESS`) and it is still usable — not cooling, not evicted,
+    /// vetted — it wins over LRU, so a conversation keeps one per-IP free
+    /// budget instead of bouncing the pool.
     pub fn pick(&self) -> Option<ProxyEndpoint> {
         if !self.is_enabled() {
             // Counted. "Am I actually rotating?" is unanswerable otherwise, and
@@ -520,6 +536,34 @@ impl ProxyPool {
         }
         let t = now();
         let mut h = self.health.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Pinned egress first: a session pins its own IP so its per-IP free-tier
+        // budget is used before it is spent, and a 429 on that IP rotates the
+        // pin rather than the whole pool. The pin is only honoured while the
+        // endpoint itself is usable — a cooling or evicted pinned address falls
+        // through to LRU rather than parking the session on a dead IP.
+        if let Some(pin) = PINNED_EGRESS
+            .try_with(|p| p.borrow().clone())
+            .ok()
+            .filter(|p| !p.is_empty())
+        {
+            let ep = eps.iter().find(|e| e.addr() == pin);
+            if let Some(ep) = ep {
+                let st = h.get(&ep.addr()).cloned().unwrap_or_default();
+                let require_vetted = require_vetted();
+                if st.cool_until <= t
+                    && st.consecutive_fail < evict_after_fails()
+                    && (!require_vetted || st.vetted_at != 0 || st.ok != 0)
+                {
+                    if let Some(st) = h.get_mut(&ep.addr()) {
+                        st.last_used_ms = now_ms();
+                        st.last_used = t;
+                    }
+                    self.rotations.fetch_add(1, Ordering::Relaxed);
+                    return Some(ep.clone());
+                }
+            }
+        }
 
         // Least-recently-used among those not cooling. LRU rather than random so
         // the load spreads evenly and no single proxy IP gets hot.
@@ -649,6 +693,30 @@ impl ProxyPool {
         // the dashboard needs to see.
     }
 
+    /// Cool an egress that drew zen's per-IP free-usage limit, for a bounded
+    /// window.
+    ///
+    /// Unlike [`note_rate_limited`], the upstream tells us the real window
+    /// (a `retry-after` of hours: that address's free budget is spent, not
+    /// merely throttled). So the caller passes the exact duration, and this
+    /// takes the MAX of the remaining cooldown and the requested window — a
+    /// later call that is already cooling longer than the budget must not be
+    /// shortened. Unknown addresses are a no-op, same as [`note_rate_limited`].
+    pub fn note_zen_429(&self, addr: &str, cool_secs: u64) {
+        if addr.is_empty() || cool_secs == 0 {
+            return;
+        }
+        let mut h = self.health.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(st) = h.get_mut(addr) else {
+            return;
+        };
+        let until = now().saturating_add(cool_secs);
+        if until > st.cool_until {
+            st.cool_until = until;
+            st.rate_limited_at = now();
+        }
+    }
+
     /// Endpoints that are neither cooling nor evicted, i.e. actually pickable.
     ///
     /// Counts only endpoints `pick()` would really return. Counting unvetted
@@ -727,9 +795,51 @@ impl ProxyPool {
         added
     }
 
+    /// Endpoints that have never been verified, oldest-registered first.
+    ///
+    /// This is the verification backlog: the whole public list is ingested as
+    /// un-vetted candidates (so the pool really holds thousands of IPs), and
+    /// each maintenance cycle proves a bounded slice of this backlog by pong.
+    /// Returns `(endpoint, last_used)` pairs so the caller can spread the slice
+    /// over the whole backlog instead of re-testing the same head every cycle.
+    pub fn unvetted(&self, limit: usize) -> Vec<(ProxyEndpoint, u64)> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let eps = self
+            .endpoints
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let h = self.health.lock().unwrap_or_else(|e| e.into_inner());
+        let mut out: Vec<(ProxyEndpoint, u64)> = eps
+            .into_iter()
+            .filter_map(|e| {
+                let st = h.get(&e.addr())?;
+                if st.vetted_at != 0 || st.ok > 0 {
+                    return None; // already proven
+                }
+                Some((e, st.last_used))
+            })
+            .collect();
+        // Least-recently-attempted first, so a cycle always moves the frontier
+        // instead of re-proving the same entries that keep failing.
+        out.sort_by_key(|(_, last)| *last);
+        out.truncate(limit);
+        out
+    }
+
     /// Does the pool need refilling?
     pub fn needs_refill(&self) -> bool {
-        self.is_enabled() && self.healthy_count() < refill_below()
+        if !self.is_enabled() {
+            return false;
+        }
+        // Thin on proven working IPs, OR still holding a backlog of un-verified
+        // candidates that a pong could promote. The second clause is what makes
+        // the pool grow: without it a pool that merely has *some* healthy member
+        // would stop verifying, and the thousands of ingested-but-unproven IPs
+        // would never be promoted into rotation.
+        self.healthy_count() < refill_below() || self.unvetted(1).len() > 0
     }
 
     /// Persist the current endpoint list, best-first, so a restart keeps the
@@ -875,9 +985,26 @@ tokio::task_local! {
     pub(crate) static USED_EGRESS: std::cell::RefCell<Option<String>>;
 }
 
+// The egress IP the CURRENT SESSION wants to keep, if any.
+//
+// Set by the router before a zen request based on the session's pinned IP
+// (see `App::zen_egress`); `ProxyPool::pick` honours it over LRU while the
+// endpoint stays usable. Read with `try_with`, so a task running outside the
+// scope (e.g. the vetting path, which uses a throwaway pool) simply gets the
+// empty string and falls through to normal LRU. The router opens the scope
+// around `upstream::send_head`, so it propagates to the connector's `pick()`.
+tokio::task_local! {
+    pub(crate) static PINNED_EGRESS: std::cell::RefCell<String>;
+}
+
 /// Egress used by the current request, if the scope is present.
 pub fn used_egress() -> Option<String> {
     USED_EGRESS.try_with(|s| s.borrow().clone()).ok().flatten()
+}
+
+/// The pinned egress for the current task, or empty when there is no pin.
+pub fn pinned_egress() -> String {
+    PINNED_EGRESS.try_with(|p| p.borrow().clone()).unwrap_or_default()
 }
 
 /// Connector that tunnels through a proxy, or connects directly when the pool
@@ -912,27 +1039,36 @@ impl tower_service::Service<Uri> for ProxyConnector {
             let port = uri.port_u16().unwrap_or(443);
             let target = format!("{host}:{port}");
 
+            // The pool is for zen's per-IP free-tier limit; a free proxy that
+            // mangles TLS or draws a WAF block would break the paid providers
+            // that work perfectly direct. So when `proxy_zen_only` is on
+            // (the default), non-zen hosts connect direct and never touch the
+            // pool. `KEYFORGE_PROXY_ZEN_ONLY=0` restores route-everything.
+            let use_pool = !crate::config::proxy_zen_only() || crate::config::is_zen_host(&host);
+
             // Try one proxy, then fall back to direct. One retry only: the
             // caller already retries across keys and providers, and stacking
             // retries here would multiply latency.
-            if let Some(p) = pool.pick() {
-                let addr = p.addr();
-                let started = std::time::Instant::now();
-                match TcpStream::connect(&addr).await {
-                    Ok(mut s) => {
-                        let _ = s.set_nodelay(true);
-                        match connect_tunnel(&mut s, &target, p.auth_header().as_deref()).await {
-                            Ok(()) => {
-                                pool.note_ok(&addr, started.elapsed().as_millis() as u64);
-                                USED_EGRESS
-                                    .try_with(|slot| *slot.borrow_mut() = Some(addr.clone()))
-                                    .ok();
-                                return Ok(TokioIo::new(s));
+            if use_pool {
+                if let Some(p) = pool.pick() {
+                    let addr = p.addr();
+                    let started = std::time::Instant::now();
+                    match TcpStream::connect(&addr).await {
+                        Ok(mut s) => {
+                            let _ = s.set_nodelay(true);
+                            match connect_tunnel(&mut s, &target, p.auth_header().as_deref()).await {
+                                Ok(()) => {
+                                    pool.note_ok(&addr, started.elapsed().as_millis() as u64);
+                                    USED_EGRESS
+                                        .try_with(|slot| *slot.borrow_mut() = Some(addr.clone()))
+                                        .ok();
+                                    return Ok(TokioIo::new(s));
+                                }
+                                Err(e) => pool.note_fail(&addr, &e.to_string()),
                             }
-                            Err(e) => pool.note_fail(&addr, &e.to_string()),
                         }
+                        Err(e) => pool.note_fail(&addr, &e.to_string()),
                     }
-                    Err(e) => pool.note_fail(&addr, &e.to_string()),
                 }
             }
 

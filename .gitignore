@@ -50,3 +50,8 @@ Thumbs.db
 captcha-*.png
 *.har
 snapshot*.json
+
+# Key material directories — never commit zen/provider key files.
+keys/
+*.proxies.txt
+proxies.txt

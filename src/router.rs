@@ -631,7 +631,23 @@ const ZEN_FINGERPRINT_TOOLS: [(&str, &str); 4] = [
     ),
 ];
 
-/// Translate an Anthropic Messages request into the OpenAI chat.completions shape
+/// A minimal zen chat request that proves an egress IP can carry a real
+/// free-tier model call: one gate-required model, the four fingerprint tools,
+/// a 1-word prompt. Used by `upstream::vet_zen_ping` as the vetting probe —
+/// only an IP that streams a `data:` frame through this body is accepted.
+pub fn zen_ping_body() -> String {
+    serde_json::to_string(&serde_json::json!({
+        "model": "big-pickle",
+        "stream": true,
+        "stream_options": { "include_usage": true },
+        "max_tokens": 16,
+        "messages": [ { "role": "user", "content": "Reply with the single word: pong" } ],
+        "tools": merge_fingerprint_tools_list(Vec::new()),
+    }))
+    .unwrap_or_else(|_| String::new())
+}
+
+/// Convert an Anthropic Messages request into the OpenAI chat.completions shape
 /// zen's free tier accepts, and add the fingerprint zen's gate requires.
 ///
 /// zen serves only the OpenAI route, so an Anthropic body must be converted, not
@@ -1589,6 +1605,25 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
                 } else {
                     Duration::from_secs(config::upstream_timeout_secs())
                 };
+                // A rotating free proxy is a coin flip on every attempt, and the
+                // budget above is sized for a DIRECT upstream (120s default plus
+                // a size term). Handing that same budget to a black-hole proxy
+                // means every dead address costs the full ~140s to discover, and
+                // a request that would have succeeded direct in 1.2s instead
+                // burns minutes. Measured: p90 head latency was 170s — exactly
+                // HEAD_BUDGET_MAX — while direct reached zen in 1.2s.
+                //
+                // So when the pool is actually in play for this attempt, cap the
+                // budget at the vetted floor. A verified proxy streams a real
+                // pong in seconds; anything that has not answered by then is a
+                // dead address and should be dropped and rotated past, not
+                // waited out. Direct egress keeps the full modelled budget
+                // because there the wait is paying for a real provider.
+                let head_budget = if streaming && app.proxy_egress_in_play() {
+                    head_budget.min(Duration::from_secs(config::proxy_head_budget_secs()))
+                } else {
+                    head_budget
+                };
                 // Never wait past the request deadline. If what is left cannot
                 // fit a viable attempt, do NOT start one: a 5s budget on a body
                 // needing 60s is not a retry, it is a guaranteed timeout that
@@ -1636,6 +1671,10 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
                     body_bytes.clone()
                 };
 
+                let zen_session_opt = zen.then(|| app.zen_session_id(fp));
+                let pinned_opt: Option<String> = zen
+                    .then(|| app.zen_egress(fp))
+                    .flatten();
                 let attempt = upstream::send_head(
                     provider.host,
                     upstream_path,
@@ -1645,6 +1684,8 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
                     &key,
                     upstream_flavor,
                     head_budget,
+                    zen_session_opt.as_deref(),
+                    pinned_opt.as_deref(),
                 )
                 .await;
                 drop(_busy);
@@ -1652,6 +1693,12 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
                 let head = match attempt {
                     HeadAttempt::Ok(h) => {
                         meta.proxy = h.proxy.clone();
+                        // Record which egress IP carried this zen success so the
+                        // session pins to it next turn (one IP = one per-IP free
+                        // budget). Empty (direct) clears the pin.
+                        if zen {
+                            app.set_zen_egress(fp, &h.proxy);
+                        }
                         h
                     }
                     HeadAttempt::Err {
@@ -1732,6 +1779,21 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
                                 // errors are deaths, not slowness.
                                 meta.head_timeout = message.contains("timed out");
                                 meta.ttfb_ms = Some(latency_ms);
+                                // Blame the EGRESS, not just the provider. Most of these
+                                // are a broken/MITM proxy: its CONNECT answered 200
+                                // (so the connector already noted `ok`), but the real TLS
+                                // handshake to the origin died — "close_notify", an
+                                // "UnknownIssuer" cert, a closed stream. Without this the
+                                // proxy keeps reading as healthy, LRU keeps picking it,
+                                // and every request stalls on the same dead tunnel.
+                                // `note_fail` cools it and, after EVICT_AFTER_FAILS,
+                                // drops it so rotation reaches a working egress.
+                                // (`proxy` was moved into `meta.proxy` above, so
+                                // blame it via that field.)
+                                if !meta.proxy.is_empty() {
+                                    crate::upstream::proxy_pool()
+                                        .note_fail(&meta.proxy, &message);
+                                }
                                 log_error(
                                     &app,
                                     "TRANSPORT",
@@ -2006,6 +2068,64 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
                         // Healthy key, just busy. Cooldown only.
                         needed_save = true;
                         let ttl = c.retry_after.unwrap_or(config::cooldown_rate_secs());
+
+                        if zen {
+                            // The zen free tier is ONE shared `public` key behind a
+                            // per-IP usage budget. A 429 here means the egress
+                            // IP's budget is spent — the key itself is fine and
+                            // every other IP is still usable, so grounding the
+                            // shared key for hours (the old path) parked the
+                            // whole provider on one dead address. Instead:
+                            //  * cool ONLY this egress IP for the upstream's real
+                            //    window (retry-after, capped — that IP's budget
+                            //    genuinely resets on that clock),
+                            //  * roll the session's zen id and clear its pin, so
+                            //    the retry takes a fresh IP with a fresh budget,
+                            //  * leave the key hot so the next attempt routes on.
+                            let window = c
+                                .retry_after_raw
+                                .unwrap_or(config::cooldown_rate_secs())
+                                .min(config::zen_429_egress_cool_max_secs());
+                            let cooled_ip = if head.proxy.is_empty() {
+                                // Direct egress drew the 429: the device IP's own
+                                // budget is spent. There is no pool entry to cool;
+                                // the workaround is for the pool to exist and take
+                                // the next attempt.
+                                String::new()
+                            } else {
+                                crate::upstream::proxy_pool().note_zen_429(&head.proxy, window);
+                                head.proxy.clone()
+                            };
+                            let rotated = app.rotate_zen_session(fp);
+                            app.set_zen_egress(fp, "");
+                            log_error(
+                                &app,
+                                "RATE",
+                                provider_id,
+                                provider.host,
+                                &key,
+                                &model,
+                                head.status,
+                                &text,
+                                &format!(
+                                    "zen free-limit: IP budget spent; egress {} cooled {}s, session rolled to {rotated}, key kept hot",
+                                    if cooled_ip.is_empty() { "direct" } else { &cooled_ip },
+                                    window
+                                ),
+                                fp,
+                                round,
+                                head.latency_ms,
+                                None,
+                                None,
+                                &meta,
+                            );
+                            errors.push(format!(
+                                "{provider_id}: zen 429 free-limit — rotated egress, retrying via a fresh IP"
+                            ));
+                            transient = true;
+                            continue;
+                        }
+
                         app.mark_dead(&key, ttl, "rate limited");
 
                         // Also retire the EGRESS, not just the key.

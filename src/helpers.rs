@@ -692,6 +692,127 @@ pub fn spawn_proxy_maintainer(app: Arc<App>) {
     });
 }
 
+/// Pull a fresh public proxy list and normalise it into the ProxyScrape JSON
+/// the pool already ingests, writing it to the primary candidates path.
+///
+/// The default source is proxifly/free-proxy-list's raw http list — a bare
+/// array of `{"proxy":"https://ip:port","ip":...,"port":...,"https":true,...}`
+/// records, which `parse_proxyscrape_json` does NOT understand on its own
+/// (it expects `{"proxies":[{ip,port,protocol,ssl,alive,uptime,timeout}]}`).
+/// So the normaliser maps each record into that shape: `protocol:"http"`,
+/// `ssl` from the `https` flag (proxifly's http list is CONNECT-capable for
+/// HTTPS origins — the ssl field is what the parser's gate reads), and the
+/// `proxy` URL as the authoritative host:port when ip/port fields are
+/// missing.
+///
+/// Returns the number of usable candidates in the downloaded file, or `Err`.
+pub async fn download_candidates(app: &Arc<App>) -> Result<usize, String> {
+    let url = config::proxy_download_url();
+    let raw = upstream::direct_get(&url, Duration::from_secs(30)).await?;
+
+    let src: serde_json::Value =
+        serde_json::from_slice(&raw).map_err(|e| format!("bad JSON from {url}: {e}"))?;
+    // Accept a bare array or a `{"proxies":[...]}` wrap.
+    let arr = match src.get("proxies").and_then(|p| p.as_array()) {
+        Some(a) => a,
+        None => match src.as_array() {
+            Some(a) => a,
+            None => return Err("download was neither a proxy array nor wrapped".into()),
+        },
+    };
+
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    for r in arr {
+        let ip = r.get("ip").and_then(|x| x.as_str()).unwrap_or("");
+        let port = r
+            .get("port")
+            .and_then(|x| x.as_u64())
+            .or_else(|| r.get("port").and_then(|x| x.as_str()).and_then(|s| s.parse().ok()))
+            .unwrap_or(0);
+        // The `proxy` field ("https://host:port") wins when ip/port are missing.
+        let mut host = ip.to_string();
+        let mut port = port;
+        if host.is_empty() || port == 0 {
+            if let Some(p) = r.get("proxy").and_then(|x| x.as_str()) {
+                let bare = p
+                    .trim_start_matches("https://")
+                    .trim_start_matches("http://")
+                    .trim_start_matches("socks5://")
+                    .trim_start_matches("socks4://");
+                match bare.rsplit_once(':') {
+                    Some((h, p2)) => {
+                        host = h.to_string();
+                        port = p2.parse().unwrap_or(0);
+                    }
+                    None => {
+                        host = bare.to_string();
+                        port = 0;
+                    }
+                }
+            }
+        }
+        if host.is_empty() || !(1..=65535).contains(&port) {
+            continue;
+        }
+        let https = r.get("https").and_then(|x| x.as_bool()).unwrap_or(false);
+        out.push(serde_json::json!({
+            "ip": host,
+            "port": port,
+            "protocol": "http",
+            "ssl": https || r.get("protocol").and_then(|x| x.as_str()) == Some("https"),
+            "alive": null,
+        }));
+    }
+    if out.is_empty() {
+        return Err("download contained no usable entries".into());
+    }
+
+    // Persist next to the other candidate paths so the cold-start seeder and
+    // the refill path both find it.
+    let dest = config::proxy_candidates_paths()
+        .first()
+        .cloned()
+        .ok_or_else(|| "no candidate path configured".to_string())?;
+    if let Some(dir) = dest.parent() {
+        if !dir.as_os_str().is_empty() {
+            std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        }
+    }
+    let tmp = dest.with_extension("json.tmp");
+    let payload = serde_json::to_vec(&serde_json::json!({ "proxies": out }))
+        .map_err(|e| format!("encode: {e}"))?;
+    std::fs::write(&tmp, payload).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &dest).map_err(|e| e.to_string())?;
+
+    app.event(
+        "info",
+        format!(
+            "proxy: downloaded {} candidates from {url} -> {}",
+            out.len(),
+            dest.display()
+        ),
+    );
+    Ok(out.len())
+}
+
+/// Refresh the candidate list before a maintainer cycle, so the refill step
+/// always works from a current list rather than one that rotted overnight.
+/// Silently skipped when offline or when the download fails (the existing
+/// candidate file, if any, still feeds the refill).
+async fn refresh_candidates(app: &Arc<App>) {
+    if app.is_offline() {
+        return;
+    }
+    match download_candidates(app).await {
+        Ok(n) => {
+            eprintln!("[keyforge] proxy: {n} fresh candidates downloaded");
+        }
+        Err(e) => {
+            app.event("warn", format!("proxy: candidate download failed: {e}"));
+        }
+    }
+}
+
 /// Fast model list sync. Probes `/v1/models` for every provider every few
 /// seconds and unions the result into each provider's declared `models` list,
 /// so the dashboard (and routing) always knows what each provider actually
@@ -786,6 +907,11 @@ pub async fn proxy_maint_cycle(app: &Arc<App>) {
     }
 
     // ── 2. refill if thin ───────────────────────────────────────────────────
+    // Refresh the public candidate list first, so the refill below works from
+    // a current list rather than one that rotted overnight. The download is
+    // direct (no proxy pool) and best-effort: it is skipped when offline and a
+    // failure falls back to whatever candidate file is already on disk.
+    refresh_candidates(app).await;
     if pool.needs_refill() {
         let added = refill_proxies(app).await;
         if added == 0 && pool.healthy_count() == 0 {
@@ -830,32 +956,68 @@ async fn refill_proxies(app: &Arc<App>) -> usize {
         return 0;
     }
 
-    // Skip anything already in the pool, then take a bounded batch. Candidates
-    // arrive sorted best-first, so the batch is the most promising slice.
+    // ── 1. ingest the WHOLE list, not a slice ──────────────────────────────
+    //
+    // A public list carries thousands of entries and the great majority are dead
+    // on arrival. Ingesting only `vet_batch` of them per cycle caps the pool at
+    // a few dozen IPs no matter how big the source is, which is not what "trust
+    // the whole list" means. So every unseen candidate joins the pool as
+    // UNVETTED: `pick()` will not route through it (the vetted gate holds), but
+    // it is now a candidate for the verification pass below, and successive
+    // cycles verify more of it without ever re-downloading.
     let known: std::collections::HashSet<String> =
         pool.snapshot().into_iter().map(|(e, _)| e.addr()).collect();
-    let batch: Vec<crate::proxy::ProxyEndpoint> = candidates
+    let fresh: Vec<crate::proxy::ProxyEndpoint> = candidates
         .into_iter()
         .filter(|e| !known.contains(&e.addr()))
-        .take(config::proxy_vet_batch())
         .collect();
-    if batch.is_empty() {
+    if fresh.is_empty() {
         return 0;
     }
+    let ingested = pool.add_endpoints(fresh);
 
-    // A provider + key to vet against. Any funded key works; this is a free
-    // endpoint, so it costs nothing.
-    let Some((host, key)) = vet_target(app) else {
+    // ── 2. verify a bounded slice of the un-vetted backlog ──────────────────
+    //
+    // Verification costs a real request each (up to `zen_ping_timeout_secs`), so
+    // only `vet_batch` are checked per cycle — but they are drawn from the whole
+    // pool now, not just the head of the download, so a cycle always makes
+    // progress on proving more of the backlog rather than re-reading a prefix.
+    let batch: Vec<crate::proxy::ProxyEndpoint> = pool
+        .unvetted(config::proxy_vet_batch())
+        .into_iter()
+        .map(|(e, _)| e)
+        .collect();
+    if batch.is_empty() {
+        return ingested;
+    }
+
+    // Vet method: a real zen "pong" (default when a zen provider is configured)
+    // or the cheap `/v1/models` probe. Only a PONG accepts a proxy — a free IP
+    // that tunnels but cannot carry a model call would just park requests on a
+    // burned address, which is exactly what the pool exists to avoid.
+    let method = config::proxy_vet_method();
+    let models_target = if method == "ping" {
+        None
+    } else {
+        // A provider + key to vet against. Any funded key works; this is a free
+        // endpoint, so it costs nothing.
+        vet_target(app)
+    };
+    if method != "ping" && models_target.is_none() {
         app.event(
             "warn",
             "proxy: no key available to vet proxies with".to_string(),
         );
         return 0;
-    };
+    }
 
     app.event(
         "info",
-        format!("proxy: vetting {} candidates from {}", batch.len(), source),
+        format!(
+            "proxy: vetting {} candidates from {} ({method})",
+            batch.len(),
+            source
+        ),
     );
 
     // Bounded concurrency: a burst of parallel connections from one device to one
@@ -866,11 +1028,15 @@ async fn refill_proxies(app: &Arc<App>) -> usize {
         let mut set = Vec::new();
         for ep in chunk {
             let ep = ep.clone();
-            let host = host.clone();
-            let key = key.clone();
+            let target = models_target.clone();
             set.push(tokio::spawn(async move {
-                let r = upstream::vet_proxy(&ep, &host, &key).await;
-                (ep, r)
+                if let Some((host, key)) = target {
+                    let r = upstream::vet_proxy(&ep, &host, &key).await;
+                    (ep, r)
+                } else {
+                    let r = upstream::vet_zen_ping(&ep).await;
+                    (ep, r)
+                }
             }));
         }
         for h in set {

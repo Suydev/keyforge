@@ -387,6 +387,22 @@ async fn route(app: Arc<App>, req: Request<hyper::body::Incoming>) -> Response<B
             "message": r.note,
         }));
     }
+    // Pull a fresh public proxy list now. Runs the same download the
+    // background maintainer uses; returns the candidate count so the dashboard
+    // can show the result instead of "watch the events feed".
+    if path == "/api/proxies/download" && method == Method::POST {
+        let a = app.clone();
+        tokio::spawn(async move {
+            match crate::helpers::download_candidates(&a).await {
+                Ok(n) => a.event("info", format!("proxy: download ok — {n} candidates")),
+                Err(e) => a.event("warn", format!("proxy: download failed: {e}")),
+            }
+        });
+        return api::ok(serde_json::json!({
+            "ok": true,
+            "message": "candidate download started — watch the events feed"
+        }));
+    }
     if path == "/api/settings" && method == Method::GET {
         let s = app.settings.lock().unwrap_or_else(|e| e.into_inner());
         return api::ok(serde_json::to_value(&*s).unwrap_or_default());
