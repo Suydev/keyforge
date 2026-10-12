@@ -626,7 +626,10 @@ pub fn proxy_vet_concurrency() -> usize {
 pub const PROXY_VET_TIMEOUT_SECS: u64 = 12;
 
 pub fn proxy_vet_timeout_secs() -> u64 {
-    env_u64("KEYFORGE_PROXY_VET_TIMEOUT_SECS", PROXY_VET_TIMEOUT_SECS as u64)
+    env_u64(
+        "KEYFORGE_PROXY_VET_TIMEOUT_SECS",
+        PROXY_VET_TIMEOUT_SECS as u64,
+    )
 }
 
 /// Head budget allowed for ONE attempt when the request is egressing through
@@ -646,7 +649,10 @@ pub fn proxy_vet_timeout_secs() -> u64 {
 pub const PROXY_HEAD_BUDGET_SECS: u64 = 25;
 
 pub fn proxy_head_budget_secs() -> u64 {
-    env_u64("KEYFORGE_PROXY_HEAD_BUDGET_SECS", PROXY_HEAD_BUDGET_SECS as u64)
+    env_u64(
+        "KEYFORGE_PROXY_HEAD_BUDGET_SECS",
+        PROXY_HEAD_BUDGET_SECS as u64,
+    )
 }
 
 /// Timeout for a zen ping-vet: a real chat request through one proxy, awaiting
@@ -655,7 +661,10 @@ pub fn proxy_head_budget_secs() -> u64 {
 pub const ZEN_PING_TIMEOUT_SECS: u64 = 45;
 
 pub fn zen_ping_timeout_secs() -> u64 {
-    env_u64("KEYFORGE_ZEN_PING_TIMEOUT_SECS", ZEN_PING_TIMEOUT_SECS as u64)
+    env_u64(
+        "KEYFORGE_ZEN_PING_TIMEOUT_SECS",
+        ZEN_PING_TIMEOUT_SECS as u64,
+    )
 }
 
 pub fn proxy_maint_secs() -> u64 {
@@ -690,12 +699,10 @@ pub fn proxy_vet_method() -> &'static str {
         };
     }
     let (s, _) = crate::settings::Settings::load_or_init();
-    let has_zen = s.providers.iter().any(|p| {
-        p.enabled
-            && p.hosts
-                .iter()
-                .any(|h| h.enabled && is_zen_host(&h.host))
-    });
+    let has_zen = s
+        .providers
+        .iter()
+        .any(|p| p.enabled && p.hosts.iter().any(|h| h.enabled && is_zen_host(&h.host)));
     if has_zen {
         "ping"
     } else {

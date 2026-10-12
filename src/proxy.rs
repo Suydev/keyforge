@@ -1004,7 +1004,9 @@ pub fn used_egress() -> Option<String> {
 
 /// The pinned egress for the current task, or empty when there is no pin.
 pub fn pinned_egress() -> String {
-    PINNED_EGRESS.try_with(|p| p.borrow().clone()).unwrap_or_default()
+    PINNED_EGRESS
+        .try_with(|p| p.borrow().clone())
+        .unwrap_or_default()
 }
 
 /// Connector that tunnels through a proxy, or connects directly when the pool
@@ -1056,7 +1058,8 @@ impl tower_service::Service<Uri> for ProxyConnector {
                     match TcpStream::connect(&addr).await {
                         Ok(mut s) => {
                             let _ = s.set_nodelay(true);
-                            match connect_tunnel(&mut s, &target, p.auth_header().as_deref()).await {
+                            match connect_tunnel(&mut s, &target, p.auth_header().as_deref()).await
+                            {
                                 Ok(()) => {
                                     pool.note_ok(&addr, started.elapsed().as_millis() as u64);
                                     USED_EGRESS

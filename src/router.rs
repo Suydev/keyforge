@@ -1672,9 +1672,7 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
                 };
 
                 let zen_session_opt = zen.then(|| app.zen_session_id(fp));
-                let pinned_opt: Option<String> = zen
-                    .then(|| app.zen_egress(fp))
-                    .flatten();
+                let pinned_opt: Option<String> = zen.then(|| app.zen_egress(fp)).flatten();
                 let attempt = upstream::send_head(
                     provider.host,
                     upstream_path,
@@ -1791,8 +1789,7 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
                                 // (`proxy` was moved into `meta.proxy` above, so
                                 // blame it via that field.)
                                 if !meta.proxy.is_empty() {
-                                    crate::upstream::proxy_pool()
-                                        .note_fail(&meta.proxy, &message);
+                                    crate::upstream::proxy_pool().note_fail(&meta.proxy, &message);
                                 }
                                 log_error(
                                     &app,

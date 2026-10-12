@@ -727,7 +727,11 @@ pub async fn download_candidates(app: &Arc<App>) -> Result<usize, String> {
         let port = r
             .get("port")
             .and_then(|x| x.as_u64())
-            .or_else(|| r.get("port").and_then(|x| x.as_str()).and_then(|s| s.parse().ok()))
+            .or_else(|| {
+                r.get("port")
+                    .and_then(|x| x.as_str())
+                    .and_then(|s| s.parse().ok())
+            })
             .unwrap_or(0);
         // The `proxy` field ("https://host:port") wins when ip/port are missing.
         let mut host = ip.to_string();

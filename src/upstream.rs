@@ -251,7 +251,8 @@ fn build_request(
             };
             h.insert(
                 HeaderName::from_static("x-opencode-session"),
-                HeaderValue::from_str(&session_owned).unwrap_or_else(|_| HeaderValue::from_static("")),
+                HeaderValue::from_str(&session_owned)
+                    .unwrap_or_else(|_| HeaderValue::from_static("")),
             );
             h.insert(
                 HeaderName::from_static("x-opencode-request"),
@@ -453,7 +454,10 @@ pub async fn vet_zen_ping(proxy: &crate::proxy::ProxyEndpoint) -> Result<u64, St
         } else {
             Err(format!(
                 "pong: HTTP {status} — {}",
-                head.split_whitespace().take(6).collect::<Vec<_>>().join(" ")
+                head.split_whitespace()
+                    .take(6)
+                    .collect::<Vec<_>>()
+                    .join(" ")
             ))
         }
     }
@@ -489,9 +493,7 @@ pub async fn direct_get(url: &str, timeout: Duration) -> Result<Vec<u8>, String>
         .pool_max_idle_per_host(0)
         .build(https);
 
-    let uri: hyper::Uri = url
-        .parse()
-        .map_err(|e| format!("bad download url: {e}"))?;
+    let uri: hyper::Uri = url.parse().map_err(|e| format!("bad download url: {e}"))?;
     let req = Request::builder()
         .method(Method::GET)
         .uri(uri)
@@ -506,10 +508,7 @@ pub async fn direct_get(url: &str, timeout: Duration) -> Result<Vec<u8>, String>
         Err(_) => return Err(format!("download timed out after {}s", timeout.as_secs())),
     };
     if !(200..300).contains(&resp.status().as_u16()) {
-        return Err(format!(
-            "download HTTP {}",
-            resp.status().as_u16()
-        ));
+        return Err(format!("download HTTP {}", resp.status().as_u16()));
     }
     resp.into_body()
         .collect()
@@ -639,16 +638,7 @@ pub async fn send(
     let started = Instant::now();
     let bytes_up = body.len() as u64;
 
-    let req = match build_request(
-        host,
-        path,
-        method,
-        client_headers,
-        body,
-        key,
-        flavor,
-        None,
-    ) {
+    let req = match build_request(host, path, method, client_headers, body, key, flavor, None) {
         Ok(r) => r,
         Err(message) => {
             return Attempt::Err {
