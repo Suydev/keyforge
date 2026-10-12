@@ -835,10 +835,7 @@ fn translated_tools(v: Option<&serde_json::Value>) -> Vec<serde_json::Value> {
 }
 
 /// Append the fingerprint tools zen requires, if absent. Deduplicates by name:
-/// zen 400s on a duplicate tool name, and Claude Code sends `Bash`/`Read`/
-/// `Grep`/`Glob` (capitalised), which are different names from the lowercase
-/// stubs — so both end up on the wire, which is fine and what we want: the model
-/// can call the real tool and Claude Code can run it.
+/// zen 400s on a duplicate tool name.
 fn merge_fingerprint_tools(existing: Option<&serde_json::Value>) -> serde_json::Value {
     merge_fingerprint_tools_list(
         existing
@@ -849,18 +846,20 @@ fn merge_fingerprint_tools(existing: Option<&serde_json::Value>) -> serde_json::
 }
 
 /// Append the fingerprint tools to an already-collected tool list, then drop
-/// duplicate names (zen 400s on them).
+/// duplicates.
+///
+/// The comparison is CASE-SENSITIVE on purpose. zen's gate is case-sensitive
+/// too: a request advertising `Bash`/`Read` instead of `bash`/`read` is
+/// answered 403, while the same request with the lowercase gate names returns
+/// 200 (verified directly against zen). Treating `Bash` as satisfying `bash`
+/// therefore looks like a harmless dedup improvement but strips the gate tool
+/// and breaks every request. The caller's capitalised tools are kept as-is AND
+/// the lowercase gate stubs are added alongside them.
 fn merge_fingerprint_tools_list(tools: Vec<serde_json::Value>) -> serde_json::Value {
     let mut out: Vec<serde_json::Value> = tools;
     let names: Vec<String> = out
         .iter()
-        .filter_map(|t| {
-            t.get("function")
-                .and_then(|f| f.get("name"))
-                .or_else(|| t.get("name"))
-                .and_then(|n| n.as_str())
-                .map(str::to_string)
-        })
+        .filter_map(|t| tool_name(t).map(str::to_string))
         .collect();
     for (name, raw) in ZEN_FINGERPRINT_TOOLS.iter() {
         if !names.iter().any(|n| n == name) {
@@ -869,17 +868,11 @@ fn merge_fingerprint_tools_list(tools: Vec<serde_json::Value>) -> serde_json::Va
             }
         }
     }
-    // Drop duplicates: keep the first occurrence of each tool name.
+    // Drop duplicates case-sensitively: keep the first occurrence.
     let mut seen: Vec<String> = Vec::new();
     let mut deduped: Vec<serde_json::Value> = Vec::new();
     for t in out {
-        let n = t
-            .get("function")
-            .and_then(|f| f.get("name"))
-            .or_else(|| t.get("name"))
-            .and_then(|n| n.as_str())
-            .unwrap_or("")
-            .to_string();
+        let n = tool_name(&t).unwrap_or_default().to_string();
         if n.is_empty() || seen.contains(&n) {
             continue;
         }
@@ -887,6 +880,15 @@ fn merge_fingerprint_tools_list(tools: Vec<serde_json::Value>) -> serde_json::Va
         deduped.push(t);
     }
     serde_json::Value::Array(deduped)
+}
+
+/// The tool's declared name, whether it is OpenAI-wrapped (`function.name`) or
+/// Anthropic-flat (`name`).
+fn tool_name(t: &serde_json::Value) -> Option<&str> {
+    t.get("function")
+        .and_then(|f| f.get("name"))
+        .or_else(|| t.get("name"))
+        .and_then(|n| n.as_str())
 }
 
 /// Drain an upstream OpenAI SSE body and fold it into a single Anthropic
