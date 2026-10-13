@@ -839,7 +839,7 @@ impl ProxyPool {
         // the pool grow: without it a pool that merely has *some* healthy member
         // would stop verifying, and the thousands of ingested-but-unproven IPs
         // would never be promoted into rotation.
-        self.healthy_count() < refill_below() || self.unvetted(1).len() > 0
+        self.healthy_count() < refill_below() || !self.unvetted(1).is_empty()
     }
 
     /// Persist the current endpoint list, best-first, so a restart keeps the

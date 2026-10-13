@@ -162,6 +162,7 @@ const STRIP: &[&str] = &[
 /// mints one per conversation (see `App::zen_session_id`) instead of a fresh
 /// random id per attempt, and re-rolls it when zen's per-IP free-usage limit
 /// trips. `None` = generate a fresh one, the old behaviour.
+#[allow(clippy::too_many_arguments)]
 fn build_request(
     host: &str,
     path: &str,

@@ -606,9 +606,11 @@ impl App {
     /// Removing a provider from `providers.json` (or the dashboard) deletes it
     /// from `self.providers`, but this gateway also tracks per-provider state in
     /// three other places that would keep the ghost alive:
-    ///   * `keys` — every `KeyState` whose `provider` id is gone,
-    ///   * `providers` (the runtime scoring map) — its `ProviderRuntime` row,
-    ///   * `pools` — the key list loaded from its file.
+    ///
+    /// - `keys`: every `KeyState` whose `provider` id is gone,
+    /// - `providers`: the runtime scoring map and its `ProviderRuntime` row,
+    /// - `pools`: the key list loaded from its file.
+    ///
     /// Without the prune, the dashboard still lists the old provider's keys, the
     /// balance sweeper still probes them, and a re-added provider with the same
     /// id would inherit stale cooldowns. Runs on every `load_key_files`, which

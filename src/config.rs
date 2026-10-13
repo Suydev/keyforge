@@ -659,7 +659,7 @@ pub fn zen_ping_timeout_secs() -> u64 {
 }
 
 pub fn proxy_maint_secs() -> u64 {
-    env_u64("KEYFORGE_PROXY_MAINT_SECS", PROXY_MAINT_SECS as u64)
+    env_u64("KEYFORGE_PROXY_MAINT_SECS", PROXY_MAINT_SECS)
 }
 
 /// Trust-all: every endpoint in the pool is pickable regardless of vetting
@@ -733,7 +733,7 @@ pub fn proxy_download_url() -> String {
 pub const PROXY_DOWNLOAD_SECS: u64 = 2 * 3600;
 
 pub fn proxy_download_secs() -> u64 {
-    env_u64("KEYFORGE_PROXY_DOWNLOAD_SECS", PROXY_DOWNLOAD_SECS as u64)
+    env_u64("KEYFORGE_PROXY_DOWNLOAD_SECS", PROXY_DOWNLOAD_SECS)
 }
 
 /// Cap on a zen 429's egress-IP cooldown. The upstream `retry-after` for the
