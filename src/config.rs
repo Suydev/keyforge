@@ -22,6 +22,9 @@ pub const BROWSER_UA: &str =
 pub const OPENCODE_UA_FALLBACK: &str =
     "opencode/1.19.0 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14";
 
+/// Version half of [`OPENCODE_UA_FALLBACK`].
+pub const OPENCODE_UA_FALLBACK_VERSION: &str = "1.19.0";
+
 /// The OpenCode version to present, discovered from `~/.opencode/opencode` (or
 /// `opencode` on PATH) and falling back to [`OPENCODE_UA_FALLBACK`].
 ///
@@ -29,25 +32,73 @@ pub const OPENCODE_UA_FALLBACK: &str =
 /// once at startup, and avoids pinning a version that will silently go stale
 /// when the client auto-updates.
 fn opencode_version() -> String {
-    const BIN: &str = "/data/data/com.termux/files/home/.opencode/opencode";
-    // `strings`-equivalent without shelling out: scan the first megabytes for the
-    // literal. The banner lives near the front of the binary.
-    if let Ok(bytes) = std::fs::read(BIN) {
-        let window = &bytes[..bytes.len().min(1 << 20)];
-        let text = String::from_utf8_lossy(window);
-        if let Some(i) = text.find("opencode/") {
-            let rest = &text[i + "opencode/".len()..];
-            let ver: String = rest
-                .chars()
-                .take_while(|c| c.is_ascii_digit() || *c == '.')
-                .collect();
-            if !ver.is_empty() {
-                return ver;
-            }
+
+    // Candidate locations, most specific first. The hardcoded Termux path is
+    // kept for the case where nothing is on PATH.
+    let mut cands: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(home) = std::env::var("HOME") {
+        cands.push(std::path::PathBuf::from(&home).join(".opencode/opencode"));
+        cands.push(std::path::PathBuf::from(&home).join(".local/bin/opencode"));
+    }
+    cands.push(std::path::PathBuf::from(
+        "/data/data/com.termux/files/home/.opencode/opencode",
+    ));
+
+    for bin in cands {
+        // Read only the head of the file. The old version did
+        // `fs::read`, which pulled the entire ~195 MB client binary into memory
+        // on a phone just to inspect the first megabyte of it.
+        let head = read_head(&bin, 1 << 20);
+        let Some(bytes) = head else { continue };
+        if let Some(v) = first_semver_after(&bytes, b"opencode/") {
+            return v;
         }
     }
+
     // No binary to read: keep the working fallback.
-    "1.19.0".to_string()
+    OPENCODE_UA_FALLBACK_VERSION.to_string()
+}
+
+/// Read up to `max` bytes from the head of a file. None if it cannot be opened.
+fn read_head(path: &std::path::Path, max: usize) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).ok()?;
+    let mut buf = vec![0u8; max];
+    let n = f.read(&mut buf).ok()?;
+    buf.truncate(n);
+    Some(buf)
+}
+
+/// Return the first semver-shaped token that follows any occurrence of `needle`.
+///
+/// Scanning for the FIRST occurrence is what made this dead: the client's
+/// earliest `opencode/` literal is an embedded interpreter path
+/// (`.../.opencode/ld-musl-aarch64.so.1`), not a version, so the old code found
+/// no digits and always fell through to the fallback even though a real version
+/// literal sat a few hundred bytes later.
+fn first_semver_after(bytes: &[u8], needle: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(bytes);
+    let needle = String::from_utf8_lossy(needle).to_string();
+    let mut from = 0usize;
+    while let Some(rel) = text[from..].find(needle.as_str()) {
+        let start = from + rel + needle.len();
+        let rest = &text[start..];
+        let ver: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_digit() || *c == '.')
+            .collect();
+        // A bare "1" or "1.2" is not a version; require at least major.minor
+        // and a leading digit, so `opencode/ld-musl-...` yields nothing.
+        if ver.len() >= 3 && ver.starts_with(|c: char| c.is_ascii_digit()) {
+            return Some(ver);
+        }
+        // Advance past this occurrence so the next one is considered.
+        from = start;
+        if from >= text.len() {
+            break;
+        }
+    }
+    None
 }
 
 /// The full User-Agent sent to zen for a zen host.

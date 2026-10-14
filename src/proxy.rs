@@ -1038,7 +1038,13 @@ impl tower_service::Service<Uri> for ProxyConnector {
                 .host()
                 .ok_or_else(|| io::Error::other("uri has no host"))?
                 .to_string();
-            let port = uri.port_u16().unwrap_or(443);
+            // Default the port from the scheme, not a bare 443. A cleartext
+            // upstream with no explicit port is port 80, and dialling it on 443
+            // is a silent connection failure.
+            let port = uri.port_u16().unwrap_or(match uri.scheme_str() {
+                Some("http") => 80,
+                _ => 443,
+            });
             let target = format!("{host}:{port}");
 
             // The pool is for zen's per-IP free-tier limit; a free proxy that

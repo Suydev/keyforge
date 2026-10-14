@@ -990,7 +990,233 @@ fn tool_name(t: &serde_json::Value) -> Option<&str> {
 /// that SSE text verbatim in a body that claims to be JSON is how a non-streaming
 /// client ends up parsing garbage. This reuses the same converter the streaming
 /// path uses and then accumulates the text, tool calls and usage into one message.
-async fn collect_sse_as_message(body: Incoming, model: &str) -> Result<Vec<u8>, String> {
+/// Accumulated view of an upstream OpenAI-shaped SSE reply.
+///
+/// Upstream streams `chat.completion.chunk`s; a caller that asked for
+/// `stream:false` needs exactly one JSON object. Both the Anthropic and the
+/// OpenAI client shapes are rendered from this one accumulator, so the two can
+/// never disagree about what upstream actually said.
+#[derive(Default)]
+struct SseAccum {
+    text: String,
+    reasoning: String,
+    /// Keyed by the upstream tool-call `index`, because a tool call arrives
+    /// spread over several chunks (id, then name, then arguments in pieces).
+    /// Appending per chunk instead collapses a split call to its last fragment.
+    tool_calls: std::collections::BTreeMap<u64, ToolCallFrag>,
+    finish_reason: String,
+    in_tok: u64,
+    out_tok: u64,
+}
+
+#[derive(Default)]
+struct ToolCallFrag {
+    id: String,
+    name: String,
+    args: String,
+}
+
+impl SseAccum {
+    fn absorb(&mut self, v: &serde_json::Value) {
+        if let Some(u) = v.get("usage").filter(|u| !u.is_null()) {
+            self.in_tok = u
+                .get("prompt_tokens")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(self.in_tok);
+            self.out_tok = u
+                .get("completion_tokens")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(self.out_tok);
+        }
+        let Some(choice) = v.pointer("/choices/0") else {
+            return;
+        };
+        if let Some(fr) = choice.get("finish_reason").and_then(|f| f.as_str()) {
+            if !fr.is_empty() {
+                self.finish_reason = fr.to_string();
+            }
+        }
+        let Some(delta) = choice.get("delta") else {
+            return;
+        };
+        if let Some(c) = delta.get("content").and_then(|c| c.as_str()) {
+            self.text.push_str(c);
+        }
+        if let Some(r) = delta.get("reasoning_content").and_then(|c| c.as_str()) {
+            self.reasoning.push_str(r);
+        }
+        if let Some(calls) = delta.get("tool_calls").and_then(|c| c.as_array()) {
+            for tc in calls {
+                // `index` is what ties the fragments of one call together. When
+                // absent, fall back to position so a single-call stream still
+                // assembles.
+                let idx = tc
+                    .get("index")
+                    .and_then(|i| i.as_u64())
+                    .unwrap_or(self.tool_calls.len() as u64);
+                let entry = self.tool_calls.entry(idx).or_default();
+                if let Some(id) = tc.get("id").and_then(|i| i.as_str()) {
+                    if !id.is_empty() {
+                        entry.id = id.to_string();
+                    }
+                }
+                let f = tc.get("function");
+                if let Some(n) = f.and_then(|f| f.get("name")).and_then(|n| n.as_str()) {
+                    // Fragments of a name concatenate; a repeated full name
+                    // (some upstreams resend it) would otherwise double up.
+                    if !n.is_empty() && !entry.name.ends_with(n) {
+                        entry.name.push_str(n);
+                    }
+                }
+                if let Some(a) = f
+                    .and_then(|f| f.get("arguments"))
+                    .and_then(|a| a.as_str())
+                {
+                    entry.args.push_str(a);
+                }
+            }
+        }
+    }
+
+    fn tool_call_values(&self) -> Vec<serde_json::Value> {
+        self.tool_calls
+            .values()
+            .enumerate()
+            .map(|(i, c)| {
+                let id = if c.id.is_empty() {
+                    format!("toolu_{i}")
+                } else {
+                    c.id.clone()
+                };
+                serde_json::json!({
+                    "id": id,
+                    "type": "tool_use",
+                    "name": c.name,
+                    "input": serde_json::from_str::<serde_json::Value>(&c.args)
+                        .unwrap_or(serde_json::json!({})),
+                })
+            })
+            .collect()
+    }
+
+    fn any_tool_calls(&self) -> bool {
+        !self.tool_calls.is_empty()
+    }
+
+    /// Anthropic Messages shape, as before: reasoning is folded into the text
+    /// block because Anthropic clients have no separate reasoning field on the
+    /// response.
+    fn to_anthropic(&self, model: &str) -> serde_json::Value {
+        let mut text = String::with_capacity(self.text.len() + self.reasoning.len());
+        text.push_str(&self.reasoning);
+        text.push_str(&self.text);
+
+        let calls = self.tool_call_values();
+        let mut content: Vec<serde_json::Value> = Vec::new();
+        if !text.trim().is_empty() {
+            content.push(serde_json::json!({"type":"text","text": text}));
+        }
+        content.extend(calls.clone());
+
+        let stop_reason = match self.finish_reason.as_str() {
+            "tool_calls" | "function_call" if !calls.is_empty() => "tool_use",
+            "length" => "max_tokens",
+            _ => "end_turn",
+        };
+
+        serde_json::json!({
+            "id": format!("msg_{}", model.replace(['/', '-', ':'], "_")),
+            "type": "message",
+            "role": "assistant",
+            "model": model,
+            "content": content,
+            "stop_reason": stop_reason,
+            "stop_sequence": serde_json::Value::Null,
+            "usage": {"input_tokens": self.in_tok, "output_tokens": self.out_tok},
+        })
+    }
+
+    /// OpenAI `chat.completion` shape. A `stream:false` OpenAI caller that got
+    /// raw SSE text in a JSON body used to end up parsing garbage; this is the
+    /// object the caller actually asked for. Reasoning stays in
+    /// `reasoning_content` rather than being merged into `content`, which is
+    /// what an OpenAI-shaped caller expects.
+    fn to_openai(&self, model: &str) -> serde_json::Value {
+        let mut message = serde_json::Map::new();
+        message.insert("role".into(), serde_json::json!("assistant"));
+        message.insert("content".into(), serde_json::json!(self.text));
+        if !self.reasoning.is_empty() {
+            message.insert(
+                "reasoning_content".into(),
+                serde_json::json!(self.reasoning),
+            );
+        }
+        let calls: Vec<serde_json::Value> = self
+            .tool_calls
+            .values()
+            .enumerate()
+            .map(|(i, c)| {
+                serde_json::json!({
+                    "index": i,
+                    "id": if c.id.is_empty() { format!("call_{i}") } else { c.id.clone() },
+                    "type": "function",
+                    "function": {
+                        "name": c.name,
+                        "arguments": if c.args.is_empty() { "{}".to_string() } else { c.args.clone() },
+                    },
+                })
+            })
+            .collect();
+        if !calls.is_empty() {
+            message.insert("tool_calls".into(), serde_json::json!(calls));
+        }
+
+        let finish_reason = if self.any_tool_calls() && self.finish_reason.is_empty() {
+            "tool_calls".to_string()
+        } else {
+            self.finish_reason.clone()
+        };
+
+        serde_json::json!({
+            "id": format!("chatcmpl-{}", &crc32ish(model, self.text.len())),
+            "object": "chat.completion",
+            "created": crate::config::now_secs(),
+            "model": model,
+            "choices": [{
+                "index": 0,
+                "message": serde_json::Value::Object(message),
+                "finish_reason": finish_reason,
+            }],
+            "usage": {
+                "prompt_tokens": self.in_tok,
+                "completion_tokens": self.out_tok,
+                "total_tokens": self.in_tok + self.out_tok,
+            },
+        })
+    }
+}
+
+/// Cheap stable-looking id for a synthesised completion. Not a security
+/// boundary: the id only has to be unique enough for a client to correlate its
+/// own stream, so a dependency-free FNV-1a over the reply beats pulling in a
+/// hashing crate for this.
+fn crc32ish(seed: &str, n: usize) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in seed.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x1000_0000_01b3);
+    }
+    h ^= n as u64;
+    h = h.wrapping_mul(0x1000_0000_01b3);
+    format!("{h:016x}")
+}
+
+/// Drain an upstream OpenAI SSE body into one JSON object of the requested shape.
+async fn collect_sse(
+    body: Incoming,
+    model: &str,
+    openai_shape: bool,
+) -> Result<Vec<u8>, String> {
     use http_body_util::BodyExt;
     // Collect the whole SSE body, then parse. Simpler than streaming and needs
     // no StreamExt dependency: zen replies are short, and this path only serves
@@ -1003,11 +1229,7 @@ async fn collect_sse_as_message(body: Incoming, model: &str) -> Result<Vec<u8>, 
         .to_bytes();
     let raw = String::from_utf8_lossy(&collected);
 
-    let mut text = String::new();
-    let mut tool_calls: Vec<serde_json::Value> = Vec::new();
-    let mut stop_reason = "end_turn";
-    let (mut in_tok, mut out_tok) = (0u64, 0u64);
-
+    let mut acc = SseAccum::default();
     for line in raw.lines() {
         let line = line.trim();
         let Some(rest) = line.strip_prefix("data:") else {
@@ -1020,83 +1242,14 @@ async fn collect_sse_as_message(body: Incoming, model: &str) -> Result<Vec<u8>, 
         let Ok(v) = serde_json::from_str::<serde_json::Value>(rest) else {
             continue;
         };
-        if let Some(u) = v.get("usage").filter(|u| !u.is_null()) {
-            in_tok = u.get("prompt_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
-            out_tok = u
-                .get("completion_tokens")
-                .and_then(|x| x.as_u64())
-                .unwrap_or(0);
-        }
-        let Some(choice) = v.pointer("/choices/0") else {
-            continue;
-        };
-        if let Some(fr) = choice.get("finish_reason").and_then(|f| f.as_str()) {
-            if !fr.is_empty() && fr != "null" {
-                stop_reason = match fr {
-                    "tool_calls" | "function_call" => "tool_use",
-                    "length" => "max_tokens",
-                    _ => "end_turn",
-                };
-            }
-        }
-        let delta = choice.get("delta");
-        if let Some(d) = delta {
-            let a = d.get("content").and_then(|c| c.as_str()).unwrap_or("");
-            let b = d
-                .get("reasoning_content")
-                .and_then(|c| c.as_str())
-                .unwrap_or("");
-            text.push_str(b);
-            text.push_str(a);
-        }
-        if let Some(calls) = delta
-            .and_then(|d| d.get("tool_calls"))
-            .and_then(|c| c.as_array())
-        {
-            for tc in calls {
-                let f = tc.get("function");
-                let id = tc.get("id").and_then(|i| i.as_str()).unwrap_or("");
-                let name = f
-                    .and_then(|f| f.get("name"))
-                    .and_then(|n| n.as_str())
-                    .unwrap_or("");
-                let args = f
-                    .and_then(|f| f.get("arguments"))
-                    .and_then(|a| a.as_str())
-                    .unwrap_or("{}");
-                if !name.is_empty() {
-                    tool_calls.push(serde_json::json!({
-                        "id": if id.is_empty() { format!("toolu_{}", tool_calls.len()) } else { id.to_string() },
-                        "type": "tool_use",
-                        "name": name,
-                        "input": serde_json::from_str::<serde_json::Value>(args)
-                            .unwrap_or(serde_json::json!({})),
-                    }));
-                }
-            }
-        }
+        acc.absorb(&v);
     }
 
-    let mut content: Vec<serde_json::Value> = Vec::new();
-    if !text.trim().is_empty() {
-        content.push(serde_json::json!({"type":"text","text": text}));
-    }
-    content.extend(tool_calls.clone());
-    let stop = if !tool_calls.is_empty() {
-        "tool_use"
+    let msg = if openai_shape {
+        acc.to_openai(model)
     } else {
-        stop_reason
+        acc.to_anthropic(model)
     };
-    let msg = serde_json::json!({
-        "id": format!("msg_{}", model.replace(['/', '-', ':'], "_")),
-        "type": "message",
-        "role": "assistant",
-        "model": model,
-        "content": content,
-        "stop_reason": stop,
-        "stop_sequence": serde_json::Value::Null,
-        "usage": {"input_tokens": in_tok, "output_tokens": out_tok},
-    });
     serde_json::to_vec(&msg).map_err(|e| e.to_string())
 }
 
@@ -1963,8 +2116,17 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
                         // A stream:false caller still gets an SSE wire format from
                         // zen, so it must be folded back into one JSON message.
                         // Collected here (zen only) rather than streaming.
-                        if zen_reply && !caller_wants_stream {
-                            let collected = match collect_sse_as_message(head.body, &model).await {
+                        //
+                        // This applies to BOTH client flavours: an OpenAI caller
+                        // asking for stream:false used to fall straight through to
+                        // `pipe()` and receive raw `text/event-stream` in a body
+                        // that claimed to be JSON, so curl and any script using it
+                        // parsed garbage. The output shape follows the caller's
+                        // flavour; the conversion-to-Anthropic decision above stays
+                        // separate and unchanged.
+                        if zen && !caller_wants_stream {
+                            let openai_shape = route.flavor != crate::config::ApiFlavor::Anthropic;
+                            let collected = match collect_sse(head.body, &model, openai_shape).await {
                                 Ok(c) => c,
                                 Err(e) => {
                                     errors.push(format!("{provider_id}: body read failed: {e}"));
@@ -2810,3 +2972,114 @@ mod zen_body_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod sse_aggregate_tests {
+    use super::*;
+
+    fn feed(chunks: &[&str]) -> SseAccum {
+        let mut a = SseAccum::default();
+        for c in chunks {
+            a.absorb(&serde_json::from_str::<serde_json::Value>(c).unwrap());
+        }
+        a
+    }
+
+    /// The regression this guards: an OpenAI caller with stream:false used to be
+    /// handed raw SSE text in a JSON body.
+    #[test]
+    fn openai_shape_is_a_chat_completion_not_sse() {
+        let a = feed(&[r#"{"choices":[{"delta":{"content":"pong"}}]}"#]);
+        let v = a.to_openai("space-bunny-free");
+        assert_eq!(v["object"].as_str(), Some("chat.completion"));
+        assert_eq!(v["choices"][0]["message"]["content"].as_str(), Some("pong"));
+        // finish_reason belongs to the choice, not the message.
+        assert!(v["choices"][0]["finish_reason"].is_string());
+    }
+
+    /// A tool call split across chunks must assemble, not collapse to its last
+    /// fragment -- id, name and arguments each arrive separately in practice.
+    #[test]
+    fn split_tool_call_fragments_are_concatenated() {
+        let a = feed(&[
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"ba"}}]}}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"sh","arguments":"{\"comm"}}]}}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"and\":\"ls\"}"}}]}}]}"#,
+            r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
+        ]);
+        let v = a.to_openai("m");
+        let tc = &v["choices"][0]["message"]["tool_calls"][0];
+        assert_eq!(tc["id"].as_str(), Some("call_1"));
+        assert_eq!(tc["function"]["name"].as_str(), Some("bash"));
+        assert_eq!(tc["function"]["arguments"].as_str(), Some(r#"{"command":"ls"}"#));
+        assert_eq!(v["choices"][0]["finish_reason"].as_str(), Some("tool_calls"));
+    }
+
+    /// The same stream must yield a correct Anthropic message, with reasoning
+    /// folded into the text block (Anthropic clients have no reasoning field).
+    #[test]
+    fn anthropic_shape_folds_reasoning_into_text() {
+        let a = feed(&[
+            r#"{"choices":[{"delta":{"reasoning_content":"thinking hard"}}]}"#,
+            r#"{"choices":[{"delta":{"content":"pong"}}]}"#,
+            r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":3}}"#,
+        ]);
+        let v = a.to_anthropic("space-bunny-free");
+        assert_eq!(v["type"].as_str(), Some("message"));
+        assert_eq!(v["content"][0]["text"].as_str(), Some("thinking hardpong"));
+        assert_eq!(v["usage"]["input_tokens"].as_u64(), Some(7));
+        assert_eq!(v["stop_reason"].as_str(), Some("end_turn"));
+    }
+
+    /// Reasoning stays separate in the OpenAI shape rather than being merged.
+    #[test]
+    fn openai_shape_keeps_reasoning_content_separate() {
+        let a = feed(&[r#"{"choices":[{"delta":{"reasoning_content":"hmm","content":"pong"}}]}"#]);
+        let v = a.to_openai("m");
+        assert_eq!(v["choices"][0]["message"]["content"].as_str(), Some("pong"));
+        assert_eq!(v["choices"][0]["message"]["reasoning_content"].as_str(), Some("hmm"));
+    }
+
+    /// Malformed chunks and the [DONE] sentinel must not derail accumulation.
+    #[test]
+    fn junk_chunks_are_skipped() {
+        let mut a = SseAccum::default();
+        a.absorb(&serde_json::json!({"choices":[{"delta":{"content":"ok"}}]}));
+        let Ok(bad) = serde_json::from_str::<serde_json::Value>("not json") else {
+            return;
+        };
+        a.absorb(&bad);
+        assert_eq!(a.text, "ok");
+    }
+}
+
+#[cfg(test)]
+mod scheme_tests {
+    /// An explicit http:// must survive the dashboard's host normalisation,
+    /// otherwise a cleartext upstream becomes a TLS handshake failure.
+    #[test]
+    fn cleartext_scheme_survives_normalize_host() {
+        assert_eq!(
+            crate::api::normalize_host_for_test("http://127.0.0.1:8791"),
+            "http://127.0.0.1:8791"
+        );
+    }
+
+    /// A bare host still means https, and a normal https URL is unchanged.
+    #[test]
+    fn https_and_bare_hosts_are_unchanged() {
+        assert_eq!(
+            crate::api::normalize_host_for_test("https://api.example.com/v1"),
+            "api.example.com"
+        );
+        assert_eq!(
+            crate::api::normalize_host_for_test("api.example.com"),
+            "api.example.com"
+        );
+        assert_eq!(
+            crate::api::normalize_host_for_test("api.example.com:8443"),
+            "api.example.com:8443"
+        );
+    }
+}
+

@@ -54,6 +54,13 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             cross: true
+          # Termux/Android. The installer has supported Termux from the start,
+          # but no Android artifact was ever published, so every Android user
+          # had to clone and run `cargo build --release` on the phone. Built
+          # against the NDK below.
+          - target: aarch64-linux-android
+            os: ubuntu-latest
+            android: true
           - target: x86_64-apple-darwin
             os: macos-latest
           - target: aarch64-apple-darwin
@@ -81,6 +88,34 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
           echo 'CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc' >> "$GITHUB_ENV"
+
+      # Android needs the NDK and an explicit linker config. `cargo build`
+      # alone fails with "can't find crate for `std`" or a missing linker.
+      - name: Install NDK (Android)
+        if: matrix.android
+        uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r27c
+
+      - name: Configure Android toolchain
+        if: matrix.android
+        shell: bash
+        run: |
+          ndk_dir="${{ steps.ndk.outputs.ndk-path }}"
+          # rustc's NDK layout: <ndk>/toolchains/llvm/prebuilt/<host>/bin
+          host_tag=x86_64-linux-android
+          sysroot="$ndk_dir/toolchains/llvm/prebuilt/$host_tag/sysroot"
+          bin="$ndk_dir/toolchains/llvm/prebuilt/$host_tag/bin"
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$bin/aarch64-linux-android21-clang" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_CC=$bin/aarch64-linux-android21-clang" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_AR=$bin/llvm-ar" >> "$GITHUB_ENV"
+          # Tell cc/rustc where the NDK sysroot and API level live.
+          echo "CC_aarch64-linux-android=\"$bin/aarch64-linux-android21-clang --sysroot=$sysroot\"" >> "$GITHUB_ENV"
+          echo "CXX_aarch64-linux-android=\"$bin/aarch64-linux-android21-clang++ --sysroot=$sysroot\"" >> "$GITHUB_ENV"
+          echo "AR_aarch64-linux-android=$bin/llvm-ar" >> "$GITHUB_ENV"
+          echo "RANLIB_aarch64-linux-android=$bin/llvm-ranlib" >> "$GITHUB_ENV"
+          echo "NDK sysroot: $sysroot"
 
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}

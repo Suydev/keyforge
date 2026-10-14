@@ -490,6 +490,11 @@ fn roll(series: &mut VecDeque<MinuteBucket>, slot: u64, cap: usize, s: BucketSam
     b.latency_n += 1;
 }
 
+/// Fallback ladder used only when `breaker_backoff_secs` is emptied in the
+/// config, which would otherwise leave the breaker with nothing to back off
+/// for. Mirrors the shipped default.
+const DEFAULT_BREAKER_BACKOFF_SECS: [u64; 3] = [15, 45, 120];
+
 impl App {
     pub fn new() -> Self {
         let (settings, warn) = crate::settings::Settings::load_or_init();
@@ -1476,15 +1481,35 @@ impl App {
             None => 0.2,
         });
 
-        // Trip the breaker after 3 consecutive failures. This is the fix for
+        // Trip the breaker once the configured streak is reached. This is the fix for
         // repeated `Bad Gateway`: rather than retrying a &host that is clearly
-        // down on every single request, skip it for a while. Backoff grows with
-        // the streak but is capped so recovery is never far away.
-        if r.consecutive_fails >= 3 {
-            let backoff = match r.consecutive_fails {
-                3..=4 => 15,
-                5..=8 => 45,
-                _ => 120,
+        // down on every single request, skip it for a while.
+        //
+        // Both the threshold and the backoff ladder come from settings now.
+        // They were hardcoded to 3 / [15, 45, 120] while `breaker_trip` and
+        // `breaker_backoff_secs` sat in the config file, on the dashboard, and
+        // in the docs as if they did something -- editing them had no effect at
+        // all, which is worse than not offering the knob.
+        let (trip, ladder) = {
+            let s = self
+                .settings
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            (
+                s.routing.breaker_trip.max(1),
+                s.routing.breaker_backoff_secs.clone(),
+            )
+        };
+        if r.consecutive_fails >= trip {
+            // Ladder index: the first rung is the trip itself, and the last rung
+            // repeats once the streak runs past the configured ladder.
+            let rung = (r.consecutive_fails.saturating_sub(trip)) as usize;
+            let backoff = if ladder.is_empty() {
+                DEFAULT_BREAKER_BACKOFF_SECS[trip.saturating_sub(1) as usize % 3]
+            } else if rung < ladder.len() {
+                ladder[rung]
+            } else {
+                *ladder.last().unwrap_or(&120)
             };
             r.open_until = config::now_secs() + backoff;
         }

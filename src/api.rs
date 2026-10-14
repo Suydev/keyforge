@@ -684,18 +684,52 @@ pub fn add_provider(app: &Arc<App>, label: &str, host: &str, keys: &[String]) ->
     })
 }
 
-/// Reduce a free-text base URL to the bare host the gateway dials over HTTPS:
-/// `https://api.reseller.com/v1` → `api.reseller.com`. A custom port survives.
+/// Reduce a free-text base URL to what the gateway dials:
+/// `https://api.reseller.com/v1` → `https://api.reseller.com`.
+/// A custom port survives.
+///
+/// An explicit `http://` is PRESERVED. The gateway dials whatever scheme the
+/// provider was configured with, so a cleartext upstream on the LAN or loopback
+/// has to stay cleartext -- discarding the scheme turns "connection refused"
+/// into a TLS handshake failure, which reads as a provider outage rather than a
+/// configuration mistake. A bare host keeps meaning https, so the ordinary
+/// `api.reseller.com` input is unchanged.
+/// Test-only re-export so the scheme-preservation contract is asserted from the
+/// routing tests as well as locally.
+#[cfg(test)]
+pub(crate) fn normalize_host_for_test(raw: &str) -> String {
+    normalize_host(raw)
+}
+
 fn normalize_host(raw: &str) -> String {
     let mut h = raw.trim();
+    let mut scheme = "";
     if let Some(pos) = h.find("://") {
+        let candidate = &h[..pos];
+        // Only http/https are meaningful; anything else (file://, sftp://) is
+        // dropped so it cannot reach the URI builder.
+        if candidate.eq_ignore_ascii_case("http") {
+            scheme = "http://";
+        }
         h = &h[pos + 3..];
     }
-    h.split(['/', '?', '#'])
+    let host = h
+        .split(['/', '?', '#'])
         .next()
         .unwrap_or("")
-        .trim()
-        .to_string()
+        .trim();
+    if host.is_empty() {
+        return String::new();
+    }
+    // An explicit port means the user knows what they want; if they also said
+    // http://, honour it. Otherwise leave the host bare (https by default).
+    if scheme == "http://" && !host.contains(':') {
+        format!("http://{host}")
+    } else if !scheme.is_empty() {
+        format!("{scheme}{host}")
+    } else {
+        host.to_string()
+    }
 }
 
 /// Make a stable provider id from a free-text label: lowercase, and every run

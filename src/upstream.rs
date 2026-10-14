@@ -54,7 +54,12 @@ fn client() -> &'static HttpsClient {
         // to everything above and the connection pool still applies.
         let https = hyper_rustls::HttpsConnectorBuilder::new()
             .with_tls_config(tls)
-            .https_only()
+            // `https_or_http`, not `https_only`: a provider configured with an
+            // explicit http:// host must be dialed in the clear. With
+            // https_only the connector rejects an http:// URI with "unsupported
+            // scheme http" before any TCP connect, so a cleartext upstream could
+            // never be reached at all.
+            .https_or_http()
             .enable_http1()
             .wrap_connector(crate::proxy::ProxyConnector::new(proxy_pool().clone()));
 
@@ -188,12 +193,22 @@ fn build_request(
     // hostname" and silently takes the whole gateway offline.
     //
     // Accept a host with or without a scheme, and tolerate a trailing slash.
-    let host = host
-        .trim()
-        .trim_end_matches('/')
-        .trim_start_matches("https://")
-        .trim_start_matches("http://");
-    let uri = format!("https://{host}{path}");
+    //
+    // An explicit `http://` is honoured rather than being upgraded to https.
+    // A cleartext upstream (a local relay, a LAN box) otherwise fails during the
+    // TLS handshake, which classifies as a transport error and fails the request
+    // over to the next provider as if the provider were down. A bare host keeps
+    // meaning https, which is what every existing config expects.
+    let trimmed = host.trim().trim_end_matches('/');
+    let (scheme, host) = if trimmed.len() >= 7 && trimmed[..7].eq_ignore_ascii_case("http://")
+    {
+        ("http", &trimmed[7..])
+    } else if trimmed.len() >= 8 && trimmed[..8].eq_ignore_ascii_case("https://") {
+        ("https", &trimmed[8..])
+    } else {
+        ("https", trimmed)
+    };
+    let uri = format!("{scheme}://{host}{path}");
     let mut req = Request::builder().method(method.clone()).uri(&uri);
     {
         let h = req.headers_mut().expect("builder has headers");
