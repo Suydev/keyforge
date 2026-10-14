@@ -4,6 +4,14 @@ on:
     branches: [main]
   pull_request:
 
+# Superseded runs on the same ref are cancelled: CI storage is a shared,
+# account-wide quota, and re-running a superseded commit keeps a second copy of
+# the same rust-cache entries alive for no benefit. Release builds are exempt
+# (see release.yml) -- a half-built release is worse than a duplicate one.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 # The gateway is a headless Linux service; the Android/Termux runtime and the
 # zen IP-pool harvester are exercised on-device, not here. This job exists to
 # keep main green: it is the compile + unit-test gate for the Rust changes that
@@ -11,6 +19,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -19,7 +28,16 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      # Only the registry/index is worth keeping. Caching target/ duplicates the
+      # compiled output for every commit, which is the single largest consumer of
+      # a 10 GB repo cache, and the build below is fast enough without it.
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            keyforge -> target
+          cache-target: false
+          cache-on-failure: false
+          shared-key: ci
 
       - name: Format check
         run: cargo fmt --all -- --check

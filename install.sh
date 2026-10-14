@@ -114,12 +114,43 @@ detect_platform() {
         PKG_HINT="pkg install rust clang"
     else
         case "$OS" in
-            Linux)  PLATFORM=linux
+            Linux)
+                # WSL reports plain `Linux`, so it needs to be identified before
+                # the generic Linux branch or it gets the wrong hints: no
+                # systemd service, no `apt install build-essential` by default,
+                # and a /mnt/c path that is far slower to build on.
+                if grep -qiE "microsoft|wsl" /proc/sys/kernel/osrelease 2>/dev/null \
+                   || grep -qiE "microsoft|wsl" /proc/version 2>/dev/null; then
+                    PLATFORM=wsl
                     SHELL_BIN=/bin/bash
-                    PKG_HINT="apt install build-essential  # or the dnf/pacman equivalent" ;;
+                    if have apt-get; then
+                        PKG_HINT="sudo apt-get update && sudo apt-get install -y build-essential pkg-config libssl-dev"
+                    else
+                        PKG_HINT="install build-essential (and pkg-config, libssl-dev) with your package manager"
+                    fi
+                    say "  detected WSL${WSL_DISTRO_NAME:+ ($WSL_DISTRO_NAME)}."
+                    say "  note: no systemd here, so 'start' uses setsid and the gateway"
+                    say "        stops when the WSL VM stops. For boot persistence see"
+                    say "        README (systemd is not required — use a Windows Task"
+                    say "        Scheduler or a shell profile hook)."
+                else
+                    PLATFORM=linux
+                    SHELL_BIN=/bin/bash
+                    if have apk; then
+                        # Alpine: musl, and the toolchain is installed, not built.
+                        PKG_HINT="apk add rust cargo build-base"
+                    elif have apt-get; then
+                        PKG_HINT="apt install build-essential  # or the dnf/pacman equivalent"
+                    else
+                        PKG_HINT="install a C toolchain + pkg-config + libssl-dev"
+                    fi
+                fi ;;
             Darwin) PLATFORM=macos
                     SHELL_BIN=/bin/bash
                     PKG_HINT="xcode-select --install" ;;
+            FreeBSD) PLATFORM=freebsd
+                    SHELL_BIN=/bin/sh
+                    PKG_HINT="pkg install rust gmake" ;;
             MINGW*|MSYS*|CYGWIN*)
                     die "Windows detected. Use install.ps1 instead:
     irm $RAW/install.ps1 | iex" ;;
@@ -127,8 +158,15 @@ detect_platform() {
         esac
     fi
 
+    # macOS on Apple Silicon, and Linux on ARM, both need cross-compiled release
+    # artifacts rather than a native build. Say so before spending 20 minutes.
     case "$ARCH" in
-        x86_64|amd64|aarch64|arm64) : ;;
+        aarch64|arm64)
+            if [ "$PLATFORM" = linux ] || [ "$PLATFORM" = wsl ]; then
+                say "  ARM64 detected. This is fine — building natively is the"
+                say "  fastest path here (an x86_64 emulator would be far slower)."
+            fi ;;
+        x86_64|amd64) : ;;
         *) warn "untested architecture: $ARCH (continuing anyway)" ;;
     esac
 }
@@ -296,16 +334,56 @@ set -uo pipefail
 
 BIN="$BIN_DIR/keyforge"
 LOG="$LOG_DIR/keyforge.log"
-PORT="\${TABI_PORT:-$PORT}"
+PORT="\${KEYFORGE_PORT:-\${TABI_PORT:-$PORT}}"
 
 mkdir -p "\$(dirname "\$LOG")" 2>/dev/null
 
-# bash /dev/tcp so no curl or nc is required for the liveness check.
-up() { (exec 3<>"/dev/tcp/127.0.0.1/\$PORT") 2>/dev/null; }
+# Liveness check.
+# The /dev/tcp form is a bash extension: it does not exist in dash, ash/busybox
+# or any other POSIX sh, where it fails silently and makes a healthy gateway look
+# dead. Try it when bash is actually running, and fall back to a portable probe
+# built from python3/curl/nc, whichever exists.
+up() {
+  if [ -n "\${BASH_VERSION:-}" ]; then
+    (exec 3<>"/dev/tcp/127.0.0.1/\$PORT") 2>/dev/null && { exec 3>&- 2>/dev/null; return 0; }
+  fi
+  if have python3; then
+    python3 -c "import socket,sys
+s=socket.socket(); s.settimeout(1)
+sys.exit(0 if s.connect_ex(('127.0.0.1', int(sys.argv[1])))==0 else 1)" "\$PORT" 2>/dev/null && return 0
+    return 1
+  fi
+  if have curl; then
+    curl -s -o /dev/null --max-time 2 "http://127.0.0.1:\$PORT/" 2>/dev/null && return 0
+    return 1
+  fi
+  if have nc; then
+    nc -z 127.0.0.1 "\$PORT" 2>/dev/null && return 0
+    return 1
+  fi
+  # Nothing to probe with: assume running rather than reporting a false failure.
+  return 0
+}
+
+# Find the running gateway WITHOUT pgrep -f.
+# `pgrep -f` matches the full command line, so it matches this script, the
+# shell that launched it, and any agent whose prompt mentions the binary -- which
+# makes it report "already running" when it is not, and makes `pkill -f` kill
+# the installer itself. On Android/Termux pgrep is also unreliable enough that
+# `pgrep -x keyforge` misses a process that /proc shows plainly. Scan /proc/exe,
+# which is authoritative on every platform we support.
+running_pids() {
+  for d in /proc/[0-9]*; do
+    [ -r "\$d/exe" ] || continue
+    case "\$(readlink "\$d/exe" 2>/dev/null)" in
+      */keyforge) printf '%s\n' "\${d#/proc/}" ;;
+    esac
+  done
+}
 
 need_bin() {
   if [ ! -x "\$BIN" ]; then
-    echo "tabi: binary not found at \$BIN" >&2
+    echo "keyforge: binary not found at \$BIN" >&2
     echo "  build it:  cd $SRC_DIR && cargo build --release" >&2
     exit 1
   fi
@@ -313,35 +391,37 @@ need_bin() {
 
 start() {
   need_bin
-  if up; then echo "tabi: already running on 127.0.0.1:\$PORT"; return 0; fi
+  if up; then echo "keyforge: already running on 127.0.0.1:\$PORT"; return 0; fi
   # setsid + nohup so it outlives this shell, the terminal, and whatever agent
   # launched it. Without setsid, closing the terminal takes the gateway with it.
-  TABI_PORT="\$PORT" setsid nohup "\$BIN" >>"\$LOG" 2>&1 </dev/null &
+  KEYFORGE_PORT="\$PORT" TABI_PORT="\$PORT" setsid nohup "\$BIN" >>"\$LOG" 2>&1 </dev/null &
   disown 2>/dev/null || true
   for _ in \$(seq 1 20); do
     sleep 0.3
     if up; then
-      echo "tabi: up on http://127.0.0.1:\$PORT  (dashboard: http://127.0.0.1:\$PORT/)"
+      echo "keyforge: up on http://127.0.0.1:\$PORT  (dashboard: http://127.0.0.1:\$PORT/)"
       return 0
     fi
   done
-  echo "tabi: failed to start within 6s — last log lines:" >&2
+  echo "keyforge: failed to start within 6s — last log lines:" >&2
   tail -n 12 "\$LOG" >&2
   return 1
 }
 
 stop() {
-  if ! pgrep -f "release/keyforge|bin/keyforge" >/dev/null 2>&1; then
-    echo "tabi: not running"; return 0
+  pids="\$(running_pids)"
+  if [ -z "\$pids" ]; then
+    echo "keyforge: not running"; return 0
   fi
   # SIGTERM first: state is flushed on term, so prefer it to SIGKILL.
-  pkill -f "release/keyforge|bin/keyforge" 2>/dev/null
+  for p in \$pids; do kill "\$p" 2>/dev/null || true; done
   for _ in \$(seq 1 10); do sleep 0.3; up || break; done
-  if up; then
-    pkill -9 -f "release/keyforge|bin/keyforge" 2>/dev/null
+  pids="\$(running_pids)"
+  if [ -n "\$pids" ]; then
+    for p in \$pids; do kill -9 "\$p" 2>/dev/null || true; done
     sleep 1
   fi
-  echo "tabi: stopped"
+  echo "keyforge: stopped"
 }
 
 status() {

@@ -114,14 +114,20 @@ jobs:
           (Get-FileHash "$name.zip" -Algorithm SHA256).Hash.ToLower() +
             "  $name.zip" | Out-File "$name.zip.sha256" -Encoding ascii
 
-      - uses: actions/upload-artifact@v4
+      # Skip the upload entirely on a dry-run dispatch. The artifacts exist to be
+      # downloaded and inspected; on a tag they are re-published to the release
+      # below, so uploading them to the Actions store as well just doubles the
+      # storage cost for a set that is about to be copied into the release.
+      - name: Upload artifacts
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
         with:
           name: keyforge-${{ matrix.target }}
           path: |
             *.tar.gz
             *.zip
             *.sha256
-          retention-days: 7
+          retention-days: 3
 
   publish:
     name: publish
