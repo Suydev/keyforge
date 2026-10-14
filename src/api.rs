@@ -713,11 +713,7 @@ fn normalize_host(raw: &str) -> String {
         }
         h = &h[pos + 3..];
     }
-    let host = h
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or("")
-        .trim();
+    let host = h.split(['/', '?', '#']).next().unwrap_or("").trim();
     if host.is_empty() {
         return String::new();
     }

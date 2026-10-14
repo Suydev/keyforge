@@ -908,10 +908,7 @@ fn normalize_tool_arguments_in_body(body: &mut serde_json::Map<String, serde_jso
         return;
     };
     for msg in messages.iter_mut() {
-        let Some(calls) = msg
-            .get_mut("tool_calls")
-            .and_then(|t| t.as_array_mut())
-        else {
+        let Some(calls) = msg.get_mut("tool_calls").and_then(|t| t.as_array_mut()) else {
             continue;
         };
         for call in calls.iter_mut() {
@@ -1068,10 +1065,7 @@ impl SseAccum {
                         entry.name.push_str(n);
                     }
                 }
-                if let Some(a) = f
-                    .and_then(|f| f.get("arguments"))
-                    .and_then(|a| a.as_str())
-                {
+                if let Some(a) = f.and_then(|f| f.get("arguments")).and_then(|a| a.as_str()) {
                     entry.args.push_str(a);
                 }
             }
@@ -1212,11 +1206,7 @@ fn crc32ish(seed: &str, n: usize) -> String {
 }
 
 /// Drain an upstream OpenAI SSE body into one JSON object of the requested shape.
-async fn collect_sse(
-    body: Incoming,
-    model: &str,
-    openai_shape: bool,
-) -> Result<Vec<u8>, String> {
+async fn collect_sse(body: Incoming, model: &str, openai_shape: bool) -> Result<Vec<u8>, String> {
     use http_body_util::BodyExt;
     // Collect the whole SSE body, then parse. Simpler than streaming and needs
     // no StreamExt dependency: zen replies are short, and this path only serves
@@ -1708,13 +1698,20 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
         }
 
         let session = app.session(fp);
-        let preferred = route
-            .pinned
-            .clone()
-            .or_else(|| session.as_ref().map(|s| s.provider.clone()));
+        // Keep the two kinds of preference apart. A provider the client named
+        // (`/codecraftapi/...`) is always honoured. The provider this session
+        // used last time is only a hint, and the config is allowed to switch it
+        // off or to abandon it when that provider has become much the slowest.
+        let (preferred, prefer) = match route.pinned.clone() {
+            Some(p) => (Some(p), crate::state::Prefer::Explicit),
+            None => (
+                session.as_ref().map(|s| s.provider.clone()),
+                crate::state::Prefer::Sticky,
+            ),
+        };
         // Model-aware scoring: latency + recent error rate + circuit breaker +
         // whether the provider even advertises this model.
-        let order = app.provider_order_for(preferred.as_deref(), &model);
+        let order = app.provider_order_for(preferred.as_deref(), prefer, &model);
         if order.is_empty() {
             return terminal_error(
                 "keyforge: no providers configured (key files empty or unreadable)",
@@ -2126,7 +2123,8 @@ pub async fn handle_proxy(app: Arc<App>, req: Request<Incoming>) -> Response<Bod
                         // separate and unchanged.
                         if zen && !caller_wants_stream {
                             let openai_shape = route.flavor != crate::config::ApiFlavor::Anthropic;
-                            let collected = match collect_sse(head.body, &model, openai_shape).await {
+                            let collected = match collect_sse(head.body, &model, openai_shape).await
+                            {
                                 Ok(c) => c,
                                 Err(e) => {
                                     errors.push(format!("{provider_id}: body read failed: {e}"));
@@ -2862,7 +2860,6 @@ mod tests {
     }
 }
 
-
 #[cfg(test)]
 mod zen_body_tests {
     use super::*;
@@ -2960,7 +2957,11 @@ mod zen_body_tests {
             "messages": [{"role": "user", "content": "hi"}],
         })));
         let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
-        assert_eq!(v["stream"].as_bool(), Some(true), "zen 403s on stream:false");
+        assert_eq!(
+            v["stream"].as_bool(),
+            Some(true),
+            "zen 403s on stream:false"
+        );
         let names: Vec<String> = v["tools"]
             .as_array()
             .unwrap()
@@ -2968,7 +2969,10 @@ mod zen_body_tests {
             .map(|t| t["function"]["name"].as_str().unwrap().to_string())
             .collect();
         for want in ["bash", "glob", "grep", "read"] {
-            assert!(names.contains(&want.to_string()), "missing {want}: {names:?}");
+            assert!(
+                names.contains(&want.to_string()),
+                "missing {want}: {names:?}"
+            );
         }
     }
 }
@@ -3011,8 +3015,14 @@ mod sse_aggregate_tests {
         let tc = &v["choices"][0]["message"]["tool_calls"][0];
         assert_eq!(tc["id"].as_str(), Some("call_1"));
         assert_eq!(tc["function"]["name"].as_str(), Some("bash"));
-        assert_eq!(tc["function"]["arguments"].as_str(), Some(r#"{"command":"ls"}"#));
-        assert_eq!(v["choices"][0]["finish_reason"].as_str(), Some("tool_calls"));
+        assert_eq!(
+            tc["function"]["arguments"].as_str(),
+            Some(r#"{"command":"ls"}"#)
+        );
+        assert_eq!(
+            v["choices"][0]["finish_reason"].as_str(),
+            Some("tool_calls")
+        );
     }
 
     /// The same stream must yield a correct Anthropic message, with reasoning
@@ -3037,7 +3047,10 @@ mod sse_aggregate_tests {
         let a = feed(&[r#"{"choices":[{"delta":{"reasoning_content":"hmm","content":"pong"}}]}"#]);
         let v = a.to_openai("m");
         assert_eq!(v["choices"][0]["message"]["content"].as_str(), Some("pong"));
-        assert_eq!(v["choices"][0]["message"]["reasoning_content"].as_str(), Some("hmm"));
+        assert_eq!(
+            v["choices"][0]["message"]["reasoning_content"].as_str(),
+            Some("hmm")
+        );
     }
 
     /// Malformed chunks and the [DONE] sentinel must not derail accumulation.
@@ -3082,4 +3095,3 @@ mod scheme_tests {
         );
     }
 }
-

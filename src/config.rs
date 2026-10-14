@@ -32,7 +32,6 @@ pub const OPENCODE_UA_FALLBACK_VERSION: &str = "1.19.0";
 /// once at startup, and avoids pinning a version that will silently go stale
 /// when the client auto-updates.
 fn opencode_version() -> String {
-
     // Candidate locations, most specific first. The hardcoded Termux path is
     // kept for the case where nothing is on PATH.
     let mut cands: Vec<std::path::PathBuf> = Vec::new();
@@ -196,7 +195,11 @@ fn opencode_identifier(prefix: &str, descending: bool) -> String {
         .unwrap_or(0);
 
     let current = (ts * COUNTER_SPAN + counter) & MASK_48;
-    let value = if descending { !current & MASK_48 } else { current };
+    let value = if descending {
+        !current & MASK_48
+    } else {
+        current
+    };
 
     let mut tail = String::with_capacity(14);
     // xorshift64* over a clock+pid seed: these are correlation ids, not secrets,
@@ -1029,7 +1032,9 @@ mod zen_fingerprint_tests {
             let (hex, tail) = split_id(&id, "ses");
             assert!(low12_ok(&hex), "counter bits out of window in {id}");
             assert_eq!(hex.len(), 12);
-            assert!(hex.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+            assert!(hex
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
             assert_eq!(tail.len(), 14, "tail must be exactly 14 chars: {id}");
             assert!(tail.chars().all(|c| c.is_ascii_alphanumeric()), "{id}");
         }

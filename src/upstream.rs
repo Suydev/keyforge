@@ -200,8 +200,7 @@ fn build_request(
     // over to the next provider as if the provider were down. A bare host keeps
     // meaning https, which is what every existing config expects.
     let trimmed = host.trim().trim_end_matches('/');
-    let (scheme, host) = if trimmed.len() >= 7 && trimmed[..7].eq_ignore_ascii_case("http://")
-    {
+    let (scheme, host) = if trimmed.len() >= 7 && trimmed[..7].eq_ignore_ascii_case("http://") {
         ("http", &trimmed[7..])
     } else if trimmed.len() >= 8 && trimmed[..8].eq_ignore_ascii_case("https://") {
         ("https", &trimmed[8..])
@@ -273,7 +272,10 @@ fn build_request(
             };
             let session_value = HeaderValue::from_str(&session_owned)
                 .unwrap_or_else(|_| HeaderValue::from_static(""));
-            h.insert(HeaderName::from_static("x-opencode-session"), session_value.clone());
+            h.insert(
+                HeaderName::from_static("x-opencode-session"),
+                session_value.clone(),
+            );
             // Must be byte-identical to x-opencode-session when present, or zen
             // answers 403. The client's own copy is stripped in STRIP, so the two
             // can never disagree.

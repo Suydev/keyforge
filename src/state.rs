@@ -495,6 +495,24 @@ fn roll(series: &mut VecDeque<MinuteBucket>, slot: u64, cap: usize, s: BucketSam
 /// for. Mirrors the shipped default.
 const DEFAULT_BREAKER_BACKOFF_SECS: [u64; 3] = [15, 45, 120];
 
+/// Why a provider was nominated for first place.
+///
+/// `provider_order_for` used to take a bare `preferred: Option<&str>` and hoist
+/// it unconditionally. That conflated two very different things: a provider the
+/// CLIENT named (which must always win, since it asked by name) and the provider
+/// this session merely happened to use last time (which is a heuristic the config
+/// explicitly offers to tune). `session_stickiness` and `sticky_escape_multiplier`
+/// sat in settings and the dashboard doing nothing because of it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Prefer {
+    /// Named explicitly by the caller, e.g. the `/codecraftapi/...` route
+    /// prefix. Always honoured.
+    Explicit,
+    /// The provider this session already used. Subject to
+    /// `session_stickiness` and `sticky_escape_multiplier`.
+    Sticky,
+}
+
 impl App {
     pub fn new() -> Self {
         let (settings, warn) = crate::settings::Settings::load_or_init();
@@ -940,11 +958,16 @@ impl App {
     /// than a marginal latency difference: switching &hosts mid-conversation
     /// means a new key, a new account wallet, and a lost prompt cache.
     pub fn provider_order(&self, preferred: Option<&str>) -> Vec<String> {
-        self.provider_order_for(preferred, "")
+        self.provider_order_for(preferred, Prefer::Explicit, "")
     }
 
     /// Model-aware variant of [`Self::provider_order`].
-    pub fn provider_order_for(&self, preferred: Option<&str>, model: &str) -> Vec<String> {
+    pub fn provider_order_for(
+        &self,
+        preferred: Option<&str>,
+        prefer: Prefer,
+        model: &str,
+    ) -> Vec<String> {
         let now = config::now_secs();
         // Policy weights come from settings so they are tunable without a rebuild.
         let (halflife, err_weight, streak_weight, model_pen_w, min_samples, biases) = {
@@ -1088,12 +1111,47 @@ impl App {
             scored.retain(|(_, _, funded, _)| *funded);
         }
 
-        let mut ids: Vec<String> = scored.into_iter().map(|(id, _, _, _)| id).collect();
+        // Lower score is better, so the pinned provider is "too slow" when its
+        // score exceeds the best alternative's by the configured factor.
+        let (sticky_on, escape_mult) = {
+            let s = self.settings.lock().unwrap_or_else(|e| e.into_inner());
+            (
+                s.routing.session_stickiness,
+                s.routing.sticky_escape_multiplier,
+            )
+        };
+
+        let mut ids: Vec<String> = scored.iter().map(|(id, _, _, _)| id.clone()).collect();
 
         if let Some(pref) = preferred {
-            if let Some(pos) = ids.iter().position(|x| x == pref) {
-                let v = ids.remove(pos);
-                ids.insert(0, v);
+            let honour = match prefer {
+                Prefer::Explicit => true,
+                Prefer::Sticky if !sticky_on => false,
+                Prefer::Sticky => {
+                    let pref_score = scored
+                        .iter()
+                        .find(|(id, ..)| id == pref)
+                        .map(|(_, s, ..)| *s);
+                    let best_other = scored
+                        .iter()
+                        .filter(|(id, ..)| id != pref)
+                        .map(|(_, s, ..)| *s)
+                        .fold(f64::INFINITY, f64::min);
+                    match (pref_score, best_other.is_finite()) {
+                        // No measurement for the pinned provider: keep it, there
+                        // is nothing to compare against.
+                        (None, _) => true,
+                        // Nothing else to choose: keep it even if it looks bad.
+                        (_, false) => true,
+                        (Some(p), true) => p <= best_other * escape_mult,
+                    }
+                }
+            };
+            if honour {
+                if let Some(pos) = ids.iter().position(|x| x == pref) {
+                    let v = ids.remove(pos);
+                    ids.insert(0, v);
+                }
             }
         }
         ids
@@ -1106,7 +1164,7 @@ impl App {
     /// opinion. TTFB (not total duration) drives the latency term, for the same
     /// reason — a thinking turn must not look like a slow provider.
     pub fn provider_scores(&self, model: &str) -> Vec<(String, f64)> {
-        let order = self.provider_order_for(None, model);
+        let order = self.provider_order_for(None, Prefer::Explicit, model);
         let now = config::now_secs();
         let (halflife, err_weight, streak_weight) = {
             let s = self.settings.lock().unwrap_or_else(|e| e.into_inner());
@@ -1491,10 +1549,7 @@ impl App {
         // in the docs as if they did something -- editing them had no effect at
         // all, which is worse than not offering the knob.
         let (trip, ladder) = {
-            let s = self
-                .settings
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let s = self.settings.lock().unwrap_or_else(|e| e.into_inner());
             (
                 s.routing.breaker_trip.max(1),
                 s.routing.breaker_backoff_secs.clone(),
@@ -2748,12 +2803,184 @@ mod tests {
             }
         }
 
-        let order = app.provider_order_for(None, SERVES);
+        let order = app.provider_order_for(None, Prefer::Explicit, SERVES);
         assert_eq!(order.first().unwrap(), &ids[0], "order was {order:?}");
         assert!(
             !order.contains(&ids[1]),
             "{} lacks the model, order was {order:?}",
             ids[1]
+        );
+    }
+
+    // ── stickiness / escape ──────────────────────────────────────────────────
+    // `session_stickiness` and `sticky_escape_multiplier` were settings the
+    // dashboard could edit and the code never read. These tests fail against the
+    // old unconditional hoist.
+
+    fn set_sticky(app: &App, on: bool, mult: f64) {
+        let mut s = app.settings.lock().unwrap();
+        s.routing.session_stickiness = on;
+        s.routing.sticky_escape_multiplier = mult;
+    }
+
+    #[test]
+    fn sticky_pin_is_honoured_when_stickiness_is_on() {
+        let app = app_all_providers();
+        set_sticky(&app, true, 4.0);
+        let ids: Vec<String> = app
+            .providers
+            .read()
+            .unwrap()
+            .iter()
+            .map(|x| x.id.to_string())
+            .collect();
+        let slow = &ids[1];
+        // Make the first-named provider clearly the slowest.
+        app.note_latency(&ids[0], 9000);
+        app.note_latency(slow, 150);
+
+        let order = app.provider_order_for(Some(slow), Prefer::Sticky, "");
+        assert_eq!(
+            order.first().unwrap(),
+            slow,
+            "stickiness should pin the session provider: {order:?}"
+        );
+    }
+
+    #[test]
+    fn disabling_stickiness_lets_the_faster_provider_win() {
+        let app = app_all_providers();
+        set_sticky(&app, false, 4.0);
+        let ids: Vec<String> = app
+            .providers
+            .read()
+            .unwrap()
+            .iter()
+            .map(|x| x.id.to_string())
+            .collect();
+        let slow = &ids[0];
+        let fast = &ids[1];
+        seed_latency(&app, slow, 9000);
+        seed_latency(&app, fast, 150);
+
+        let order = app.provider_order_for(Some(slow), Prefer::Sticky, "");
+        assert_ne!(
+            order.first().unwrap(),
+            slow,
+            "stickiness off must not pin: {order:?}"
+        );
+    }
+
+    /// Latency is only trusted once a provider has `min_samples` readings;
+    /// below that the score blends toward a neutral 1.5s default, which
+    /// compresses the ratio and hides a genuinely slow provider. Seed enough
+    /// samples for the comparison to mean what it says.
+    fn seed_latency(app: &App, id: &str, ms: u64) {
+        for _ in 0..4 {
+            app.note_latency(id, ms);
+        }
+    }
+
+    #[test]
+    fn escape_multiplier_abandons_a_much_slower_pin() {
+        let app = app_all_providers();
+        set_sticky(&app, true, 4.0);
+        let ids: Vec<String> = app
+            .providers
+            .read()
+            .unwrap()
+            .iter()
+            .map(|x| x.id.to_string())
+            .collect();
+        let slow = &ids[0];
+        let fast = &ids[1];
+        seed_latency(&app, slow, 9000);
+        seed_latency(&app, fast, 150);
+
+        let order = app.provider_order_for(Some(slow), Prefer::Sticky, "");
+        assert_eq!(
+            order.first().unwrap(),
+            fast,
+            "a pin this much slower must be abandoned: {order:?}"
+        );
+    }
+
+    /// The guard above is not the whole story: with only a handful of samples
+    /// the slow provider is not yet trusted, so the pin is KEPT. That is
+    /// deliberate -- abandoning a session's provider on one unlucky measurement
+    /// would cost a prompt cache for nothing.
+    #[test]
+    fn an_untrusted_slow_pin_is_not_yet_abandoned() {
+        let app = app_all_providers();
+        set_sticky(&app, true, 4.0);
+        let ids: Vec<String> = app
+            .providers
+            .read()
+            .unwrap()
+            .iter()
+            .map(|x| x.id.to_string())
+            .collect();
+        let slow = &ids[0];
+        let other = &ids[1];
+        app.note_latency(slow, 9000); // one sample only
+        app.note_latency(other, 150);
+
+        let order = app.provider_order_for(Some(slow), Prefer::Sticky, "");
+        assert_eq!(
+            order.first().unwrap(),
+            slow,
+            "below min_samples the pin should survive: {order:?}"
+        );
+    }
+
+    #[test]
+    fn a_measured_but_competitive_pin_is_kept() {
+        let app = app_all_providers();
+        // A multiplier of 1000 means the escape effectively never fires, so even
+        // a somewhat slower pin survives.
+        set_sticky(&app, true, 1000.0);
+        let ids: Vec<String> = app
+            .providers
+            .read()
+            .unwrap()
+            .iter()
+            .map(|x| x.id.to_string())
+            .collect();
+        let pinned = &ids[0];
+        let other = &ids[1];
+        seed_latency(&app, pinned, 900);
+        seed_latency(&app, other, 150);
+
+        let order = app.provider_order_for(Some(pinned), Prefer::Sticky, "");
+        assert_eq!(
+            order.first().unwrap(),
+            pinned,
+            "a mildly slower pin must be kept: {order:?}"
+        );
+    }
+
+    #[test]
+    fn an_explicit_pin_ignores_stickiness_settings() {
+        let app = app_all_providers();
+        // Even with stickiness fully off, a provider the CLIENT named wins.
+        set_sticky(&app, false, 1.0);
+        let ids: Vec<String> = app
+            .providers
+            .read()
+            .unwrap()
+            .iter()
+            .map(|x| x.id.to_string())
+            .collect();
+        let named = &ids[0];
+        let faster = &ids[1];
+        seed_latency(&app, named, 9000);
+        seed_latency(&app, faster, 150);
+
+        let order = app.provider_order_for(Some(named), Prefer::Explicit, "");
+        assert_eq!(
+            order.first().unwrap(),
+            named,
+            "an explicit pin must always be honoured: {order:?}"
         );
     }
 
@@ -2766,7 +2993,7 @@ mod tests {
         for p in &*app.providers.read().unwrap() {
             app.set_models_seen(p.id, vec!["a".into()]);
         }
-        let order = app.provider_order_for(None, "brand-new-model");
+        let order = app.provider_order_for(None, Prefer::Explicit, "brand-new-model");
         assert_eq!(order.len(), n, "order was {order:?}");
     }
 
@@ -2780,7 +3007,7 @@ mod tests {
         app.set_models_seen(&ids[0], vec!["test-other-model".into()]);
         app.set_models_seen(&ids[1], vec!["test-other-model".into()]);
         app.set_models_seen(&ids[2], vec!["test-only-model".into()]);
-        let order = app.provider_order_for(Some(&ids[0]), "test-only-model");
+        let order = app.provider_order_for(Some(&ids[0]), Prefer::Explicit, "test-only-model");
         assert_eq!(order.first().unwrap(), &ids[2], "order was {order:?}");
         assert!(!order.contains(&ids[0]), "order was {order:?}");
     }
