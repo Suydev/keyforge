@@ -495,6 +495,54 @@ fn roll(series: &mut VecDeque<MinuteBucket>, slot: u64, cap: usize, s: BucketSam
 /// for. Mirrors the shipped default.
 const DEFAULT_BREAKER_BACKOFF_SECS: [u64; 3] = [15, 45, 120];
 
+/// Should a Sticky pin survive this round?
+///
+/// `p` is the pinned provider's score, `best_other` the best score among the
+/// alternatives (lower is better), `mult` the configured escape multiplier.
+///
+/// Two edge cases this gets wrong if written inline:
+///  * Every additive score term is >= 0, so a score can only go negative via a
+///    user `bias`. In that domain `best_other * mult` with `mult > 1` is MORE
+///    negative than `best_other`, which flips the comparison and discards the
+///    strictly-best pin. There we compare ordering instead.
+///  * A non-positive multiplier is not a ratio at all. Scaling by it would
+///    abandon unconditionally, so we treat it as "escape disabled".
+fn should_honour_sticky_pin(p: f64, best_other: f64, mult: f64) -> bool {
+    if mult <= 0.0 {
+        // Escape disabled: stickiness is unconditional, as before this knob
+        // existed.
+        return true;
+    }
+    if p <= 0.0 || best_other <= 0.0 {
+        return p <= best_other;
+    }
+    p <= best_other * mult
+}
+
+/// Which backoff band a consecutive-failure streak falls in.
+///
+/// Band widths double: 2, 4, 8, ... So with a trip of 3 the bands are
+/// 3..=4 (rung 0), 5..=8 (rung 1), 9.. (rung 2) -- exactly the shipped
+/// `3..=4 => 15, 5..=8 => 45, _ => 120` bands.
+///
+/// The first attempt indexed by `fails - trip` one rung per failure, which
+/// reached the top rung at 5 consecutive failures where the shipped bands
+/// needed 9, benching a recovering provider for 120s instead of 15s.
+fn breaker_band(steps_in: u32) -> usize {
+    let mut left = steps_in;
+    let mut width: u32 = 2;
+    let mut band = 0usize;
+    while left >= width {
+        left -= width;
+        width = width.saturating_mul(2);
+        band += 1;
+        if band > 32 {
+            break;
+        }
+    }
+    band
+}
+
 /// Why a provider was nominated for first place.
 ///
 /// `provider_order_for` used to take a bare `preferred: Option<&str>` and hoist
@@ -1143,7 +1191,7 @@ impl App {
                         (None, _) => true,
                         // Nothing else to choose: keep it even if it looks bad.
                         (_, false) => true,
-                        (Some(p), true) => p <= best_other * escape_mult,
+                        (Some(p), true) => should_honour_sticky_pin(p, best_other, escape_mult),
                     }
                 }
             };
@@ -1556,11 +1604,19 @@ impl App {
             )
         };
         if r.consecutive_fails >= trip {
-            // Ladder index: the first rung is the trip itself, and the last rung
-            // repeats once the streak runs past the configured ladder.
-            let rung = (r.consecutive_fails.saturating_sub(trip)) as usize;
+            // Step through the ladder in BANDS, not one rung per failure.
+            //
+            // The first attempt indexed by `consecutive_fails - trip`, which
+            // reached the top rung at 5 consecutive failures where the shipped
+            // `3..=4 => 15, 5..=8 => 45, _ => 120` bands needed 9. That silently
+            // benched a recovering provider for 120s instead of 15s -- a real
+            // availability regression disguised as a refactor. Each rung now
+            // covers a band twice as wide, so the default ladder reproduces the
+            // shipped bands exactly and a custom ladder still behaves sanely.
+            let steps_in = r.consecutive_fails.saturating_sub(trip);
+            let rung = breaker_band(steps_in);
             let backoff = if ladder.is_empty() {
-                DEFAULT_BREAKER_BACKOFF_SECS[trip.saturating_sub(1) as usize % 3]
+                DEFAULT_BREAKER_BACKOFF_SECS[rung % DEFAULT_BREAKER_BACKOFF_SECS.len()]
             } else if rung < ladder.len() {
                 ladder[rung]
             } else {
@@ -3656,5 +3712,86 @@ mod tests {
         // Never below the configured floor.
         app.learn_hold(&ids[0], TEST_MODEL, base * 0.1);
         assert!((app.hold_for(&ids[0], TEST_MODEL) - (base + 2.4)).abs() < 1e-9);
+    }
+}
+
+#[cfg(test)]
+mod escape_guard_tests {
+    use super::should_honour_sticky_pin as should_honour;
+
+    #[test]
+    fn a_much_slower_pin_is_abandoned() {
+        assert!(
+            !should_honour(9.0, 0.15, 4.0),
+            "60x slower must be abandoned"
+        );
+    }
+
+    #[test]
+    fn a_competitive_pin_is_kept() {
+        assert!(should_honour(0.15, 0.9, 4.0), "pinned is the better one");
+        assert!(
+            should_honour(0.6, 0.15, 4.0),
+            "exactly 4x is kept (inclusive)"
+        );
+    }
+
+    /// Regression: with a negative score on BOTH sides, multiplying by a
+    /// multiplier > 1 made the right-hand side MORE negative than the pinned
+    /// score, so a strictly-best pin was discarded.
+    #[test]
+    fn negative_scores_do_not_invert_the_rule() {
+        assert!(
+            should_honour(-3.0, -1.0, 4.0),
+            "pinned (-3) IS better than best_other (-1) and must be kept"
+        );
+        assert!(
+            !should_honour(-1.0, -3.0, 4.0),
+            "pinned (-1) IS worse and must be abandoned"
+        );
+    }
+
+    /// Regression: `sticky_escape_multiplier: 0` scaled the RHS to 0.0, which
+    /// abandoned the pin unconditionally -- the opposite of "never abandon".
+    #[test]
+    fn a_zero_or_negative_multiplier_never_abandons() {
+        assert!(should_honour(9.0, 0.15, 0.0), "0 must mean never-escape");
+        assert!(
+            should_honour(9.0, 0.15, -4.0),
+            "negative must mean never-escape"
+        );
+    }
+}
+
+#[cfg(test)]
+mod breaker_ladder_tests {
+    use super::*;
+
+    /// Reproduces the shipped 3 / [15,45,120] bands exactly. The first
+    /// implementation indexed by `fails - trip` and reached 120s at 5 fails
+    /// where the original needed 9, benching recovering providers far longer.
+    #[test]
+    fn default_ladder_reproduces_the_shipped_bands() {
+        let trip = 3u32;
+        let ladder = [15u64, 45, 120];
+        let backoff = |cf: u32| -> u64 {
+            let rung = breaker_band(cf.saturating_sub(trip));
+            if rung < ladder.len() {
+                ladder[rung]
+            } else {
+                *ladder.last().unwrap()
+            }
+        };
+        assert_eq!(backoff(3), 15, "trip itself");
+        assert_eq!(backoff(4), 15, "still first band");
+        assert_eq!(backoff(5), 45, "second band starts at 5");
+        assert_eq!(backoff(8), 45, "still second band");
+        assert_eq!(backoff(9), 120, "third band starts at 9, as shipped");
+        assert_eq!(backoff(99), 120, "clamped at the top rung");
+        assert_eq!(
+            backoff(17),
+            120,
+            "band 2 ends at cf=16, widths double again at 17"
+        );
     }
 }

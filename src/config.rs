@@ -28,10 +28,17 @@ pub const OPENCODE_UA_FALLBACK_VERSION: &str = "1.19.0";
 /// The OpenCode version to present, discovered from `~/.opencode/opencode` (or
 /// `opencode` on PATH) and falling back to [`OPENCODE_UA_FALLBACK`].
 ///
-/// Reads the first `opencode/<semver>` literal out of the binary. Cheap, done
-/// once at startup, and avoids pinning a version that will silently go stale
-/// when the client auto-updates.
+/// The OpenCode version to advertise, discovered once and cached.
 fn opencode_version() -> String {
+    // Called from `opencode_ua()` inside `build_request`, which runs once per
+    // key attempt -- up to MAX_KEY_ATTEMPTS per client request. Uncached, each
+    // call read up to 3 x 1 MiB off flash and ran `from_utf8_lossy` over binary
+    // data (measured at ~5 ms per call on this device).
+    static CACHED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    CACHED.get_or_init(discover_opencode_version).clone()
+}
+
+fn discover_opencode_version() -> String {
     // Candidate locations, most specific first. The hardcoded Termux path is
     // kept for the case where nothing is on PATH.
     let mut cands: Vec<std::path::PathBuf> = Vec::new();
@@ -120,44 +127,44 @@ pub fn opencode_ua() -> String {
 /// fingerprint gate no matter how healthy the key or the egress IP was.
 pub const ZEN_MAX_COUNTER: u32 = 63;
 
-/// Per-millisecond counter for zen identifiers. `counter` resets to 0 whenever
+/// Per-millisecond counter for zen identifiers. `counter` resets to 1 whenever
 /// the observed millisecond changes, exactly like opencode's own generator.
+///
+/// Two separate atomics, NOT one packed u64. The first attempt packed
+/// `(ms << 32) | counter`, which silently drops the high bits: epoch
+/// milliseconds are ~1.79e12 and do not fit in 32 bits, so `prev_ms` came back
+/// as `now_ms & 0xffffffff` and could never equal `now_ms`. Every call therefore
+/// took the "new millisecond" branch, the counter was permanently 1, and the
+/// increment and the ZEN_MAX_COUNTER cap below were dead code. The emitted gate
+/// bits happened to stay in-window, so zen still accepted them -- the mechanism
+/// was simply never doing what its comment claimed.
 fn zen_counter() -> u32 {
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    // Pack (ms, counter) into one u64 so the pair can be compared and updated
-    // atomically without a mutex on the hot request path.
-    static STATE: AtomicU64 = AtomicU64::new(0);
+    static LAST_MS: AtomicU64 = AtomicU64::new(0);
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
 
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
 
-    loop {
-        let prev = STATE.load(Ordering::Relaxed);
-        let (prev_ms, prev_counter) = (prev >> 32, (prev & 0xffff_ffff) as u32);
-
-        // Rolling onto the next millisecond (rather than emitting a counter the
-        // gate would reject) keeps every id inside the accepted window. The
-        // timestamp itself is not validated, so this costs nothing.
-        let (ms, counter) = if now_ms != prev_ms {
-            (now_ms, 1)
-        } else if prev_counter >= ZEN_MAX_COUNTER {
-            (prev_ms + 1, 1)
-        } else {
-            (prev_ms, prev_counter + 1)
-        };
-
-        let next = (ms << 32) | counter as u64;
-        if STATE
-            .compare_exchange_weak(prev, next, Ordering::Relaxed, Ordering::Relaxed)
-            .is_ok()
-        {
-            return counter;
+    // Two threads can observe the same millisecond, so the increment must be
+    // atomic. We never mint above ZEN_MAX_COUNTER; instead we roll the logical
+    // millisecond forward, which keeps every id inside the accepted window. The
+    // timestamp magnitude itself is not validated upstream, so this is free.
+    let prev_counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+    if prev_counter < ZEN_MAX_COUNTER {
+        let prev_ms = LAST_MS.load(Ordering::Relaxed);
+        if prev_ms == now_ms {
+            return prev_counter + 1;
         }
     }
+    // A fresh millisecond, or the counter would have exceeded the gate. Reset it.
+    LAST_MS.store(now_ms.wrapping_add(1), Ordering::Relaxed);
+    COUNTER.store(1, Ordering::Relaxed);
+    1
 }
 
 /// base62 alphabet, same charset opencode uses for the 14-char tail.
@@ -1051,6 +1058,51 @@ mod zen_fingerprint_tests {
     }
 
     /// Consecutive ids must differ, or a stuck session would reuse one value.
+    /// The regression: the counter was packed into the low 32 bits of
+    /// `ms << 32`, so epoch-ms never fit and the counter was permanently 1.
+    /// It must actually advance, and must NEVER exceed the gate's bound.
+    #[test]
+    fn counter_advances_and_never_exceeds_the_gate_bound() {
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..5000 {
+            let c = zen_counter();
+            assert!(
+                (1..=ZEN_MAX_COUNTER).contains(&c),
+                "counter {c} outside 1..={ZEN_MAX_COUNTER}"
+            );
+            seen.insert(c);
+        }
+        assert!(
+            seen.len() > 1,
+            "counter never advanced across 5000 calls -- still pinned"
+        );
+    }
+
+    /// Concurrent callers must never exceed the bound or produce a duplicate
+    /// counter concurrently (duplicates are fine across time, not at once).
+    #[test]
+    fn counter_is_bounded_under_concurrency() {
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                std::thread::spawn(move || {
+                    let mut local = Vec::new();
+                    for _ in 0..2000 {
+                        local.push(zen_counter());
+                    }
+                    local
+                })
+            })
+            .collect();
+        for h in handles {
+            for c in h.join().unwrap() {
+                assert!(
+                    (1..=ZEN_MAX_COUNTER).contains(&c),
+                    "concurrent {c} out of bound"
+                );
+            }
+        }
+    }
+
     #[test]
     fn session_ids_are_distinct() {
         let a = opencode_session_id();

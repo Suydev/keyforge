@@ -200,14 +200,25 @@ fn build_request(
     // over to the next provider as if the provider were down. A bare host keeps
     // meaning https, which is what every existing config expects.
     let trimmed = host.trim().trim_end_matches('/');
-    let (scheme, host) = if trimmed.len() >= 7 && trimmed[..7].eq_ignore_ascii_case("http://") {
-        ("http", &trimmed[7..])
-    } else if trimmed.len() >= 8 && trimmed[..8].eq_ignore_ascii_case("https://") {
-        ("https", &trimmed[8..])
-    } else {
-        ("https", trimmed)
-    };
-    let uri = format!("{scheme}://{host}{path}");
+    // Strip with `starts_with` and a `get`, never a byte-index slice: slicing
+    // `[..7]` on a host with multi-byte UTF-8 near the front panics, and
+    // `trim_start_matches` stripped REPEATEDLY whereas this strips once -- so
+    // "https://https://example.com" would have produced the exact doubled-scheme
+    // URI the comment above exists to prevent. Guard the doubled form explicitly.
+    let trimmed = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))
+        .unwrap_or(trimmed);
+    // A bare host means https. An explicit http:// is honoured (see above), so
+    // remember whether the operator actually wrote one.
+    let explicit_cleartext = host.trim().trim_end_matches('/').len() >= 7
+        && host
+            .trim()
+            .trim_end_matches('/')
+            .get(..7)
+            .is_some_and(|p| p.eq_ignore_ascii_case("http://"));
+    let scheme = if explicit_cleartext { "http" } else { "https" };
+    let uri = format!("{scheme}://{trimmed}{path}");
     let mut req = Request::builder().method(method.clone()).uri(&uri);
     {
         let h = req.headers_mut().expect("builder has headers");

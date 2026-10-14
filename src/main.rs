@@ -420,6 +420,14 @@ async fn route(app: Arc<App>, req: Request<hyper::body::Incoming>) -> Response<B
             Ok(()) => {
                 let mut s = app.settings.lock().unwrap_or_else(|e| e.into_inner());
                 *s = new_settings;
+                // Release the settings lock BEFORE event(). `MutexGuard` drops at
+                // end of scope, not at last use, so holding it across event()
+                // made this the only settings->inner edge in the crate. Paired
+                // with the inner->settings edges in note_provider_fail and
+                // provider_order_for that is an ABBA deadlock: a dashboard save
+                // interleaving with a router round wedges both, and `inner` is the
+                // global state lock, so the whole gateway hangs.
+                drop(s);
                 app.event("info", "settings updated via dashboard".to_string());
                 return api::ok(serde_json::json!({ "ok": true, "message": "settings saved" }));
             }
