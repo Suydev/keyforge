@@ -154,6 +154,12 @@ const STRIP: &[&str] = &[
     "x-api-key",
     "user-agent",
     "accept-encoding",
+    // zen's gate requires `x-opencode-session-id` to EQUAL `x-opencode-session`
+    // whenever it is present (mismatch => 403). We overwrite `x-opencode-session`
+    // with our own minted id further down, so forwarding the client's copy
+    // through unchanged would manufacture a guaranteed mismatch on every zen
+    // request from a native opencode client. Strip it and set it ourselves.
+    "x-opencode-session-id",
 ];
 
 /// Build the outbound request. Shared by the buffered and streaming paths.
@@ -250,10 +256,15 @@ fn build_request(
                 Some(s) => s.to_string(),
                 None => config::opencode_session_id(),
             };
+            let session_value = HeaderValue::from_str(&session_owned)
+                .unwrap_or_else(|_| HeaderValue::from_static(""));
+            h.insert(HeaderName::from_static("x-opencode-session"), session_value.clone());
+            // Must be byte-identical to x-opencode-session when present, or zen
+            // answers 403. The client's own copy is stripped in STRIP, so the two
+            // can never disagree.
             h.insert(
-                HeaderName::from_static("x-opencode-session"),
-                HeaderValue::from_str(&session_owned)
-                    .unwrap_or_else(|_| HeaderValue::from_static("")),
+                HeaderName::from_static("x-opencode-session-id"),
+                session_value,
             );
             h.insert(
                 HeaderName::from_static("x-opencode-request"),

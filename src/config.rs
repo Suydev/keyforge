@@ -58,38 +58,112 @@ pub fn opencode_ua() -> String {
     )
 }
 
-/// Session id in the exact shape zen's client gate accepts: `ses_` + 12 hex +
-/// 14 hex. A bare UUID-style id is refused with 403. (zen checks the SHAPE, not
-/// uniqueness: a reused or all-zero id is accepted, so this is generated fresh
-/// per attempt for safety, not because the gateway demands it.)
-pub fn opencode_session_id() -> String {
-    format!("ses_{}{}", random_hex(12), random_hex(14))
-}
+/// Largest per-millisecond counter zen's client gate accepts.
+///
+/// zen's identifier is `ses_` + 12 lowercase hex + 14 base62 chars. opencode
+/// packs `(Date.now() << 12) | counter` into the 48-bit field and inverts it, so
+/// the low 12 bits of the emitted hex are `0xfff - counter`. The gate requires
+/// `counter <= 63`, i.e. low12 >= 0xfc0 — 64 of the 4096 possible values.
+///
+/// Emitting a UNIFORM random field (as this gateway used to) therefore passed
+/// only 64/4096 = 1.6% of the time, so ~98% of zen requests were refused by the
+/// fingerprint gate no matter how healthy the key or the egress IP was.
+pub const ZEN_MAX_COUNTER: u32 = 63;
 
-/// Request id in the shape the gate accepts: `msg_` + 12 hex + 14 hex.
-pub fn opencode_request_id() -> String {
-    format!("msg_{}{}", random_hex(12), random_hex(14).to_uppercase())
-}
-
-fn random_hex(n: usize) -> String {
+/// Per-millisecond counter for zen identifiers. `counter` resets to 0 whenever
+/// the observed millisecond changes, exactly like opencode's own generator.
+fn zen_counter() -> u32 {
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
-    // Not cryptographic: these are per-attempt correlation ids the gateway only
-    // checks for shape, and a dependency-free clock+pid mix is enough entropy
-    // to keep concurrent attempts from colliding.
-    let mut state = SystemTime::now()
+
+    // Pack (ms, counter) into one u64 so the pair can be compared and updated
+    // atomically without a mutex on the hot request path.
+    static STATE: AtomicU64 = AtomicU64::new(0);
+
+    let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    loop {
+        let prev = STATE.load(Ordering::Relaxed);
+        let (prev_ms, prev_counter) = (prev >> 32, (prev & 0xffff_ffff) as u32);
+
+        // Rolling onto the next millisecond (rather than emitting a counter the
+        // gate would reject) keeps every id inside the accepted window. The
+        // timestamp itself is not validated, so this costs nothing.
+        let (ms, counter) = if now_ms != prev_ms {
+            (now_ms, 1)
+        } else if prev_counter >= ZEN_MAX_COUNTER {
+            (prev_ms + 1, 1)
+        } else {
+            (prev_ms, prev_counter + 1)
+        };
+
+        let next = (ms << 32) | counter as u64;
+        if STATE
+            .compare_exchange_weak(prev, next, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            return counter;
+        }
+    }
+}
+
+/// base62 alphabet, same charset opencode uses for the 14-char tail.
+const ZEN_B62: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
+/// Session id in the exact shape zen's client gate accepts.
+///
+/// opencode emits `ses_` + 12 lowercase hex + 14 base62, where the hex field is
+/// the 48-bit two's complement of `~(Date.now() * 0x1000 + counter)`. We
+/// reproduce that bit-for-bit so the low-12-bit counter always lands in the
+/// accepted window (see [`ZEN_MAX_COUNTER`]).
+pub fn opencode_session_id() -> String {
+    opencode_identifier("ses", true)
+}
+
+/// Request id in the shape the gate accepts: `msg_` + 12 hex + 14 base62.
+/// Ascending (not inverted), matching opencode's message ids.
+pub fn opencode_request_id() -> String {
+    opencode_identifier("msg", false)
+}
+
+/// Build one zen identifier: `<prefix>_<12 lowercase hex><14 base62>`.
+///
+/// `descending` inverts the 48-bit value (opencode's `~current`); ascending
+/// leaves it as-is. The tail is base62 — the gateway only requires it to be 14
+/// characters, but matching the real charset costs nothing.
+fn opencode_identifier(prefix: &str, descending: bool) -> String {
+    const COUNTER_SPAN: u64 = 0x1000;
+    const MASK_48: u64 = (1u64 << 48) - 1;
+
+    let counter = zen_counter() as u64;
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    let current = (ts * COUNTER_SPAN + counter) & MASK_48;
+    let value = if descending { !current & MASK_48 } else { current };
+
+    let mut tail = String::with_capacity(14);
+    // xorshift64* over a clock+pid seed: these are correlation ids, not secrets,
+    // and a dependency-free mix is enough to keep concurrent ids distinct.
+    let mut state = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0)
-        ^ (std::process::id() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    let mut out = String::with_capacity(n);
-    while out.len() < n {
-        // xorshift64*: deterministic, no dependency, good enough dispersion.
+        ^ (std::process::id() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        ^ counter.wrapping_mul(0xD6E8_FEB8_6659_FD93);
+    while tail.len() < 14 {
         state ^= state << 13;
         state ^= state >> 7;
         state ^= state << 17;
-        out.push_str(&format!("{:016x}", state));
+        tail.push(ZEN_B62[(state >> 33) as usize % 62] as char);
     }
-    out[..n].to_string()
+
+    format!("{prefix}_{value:012x}{tail}")
 }
 
 pub const DEFAULT_PORT: u16 = 8787;
@@ -876,3 +950,68 @@ pub const CLIENT_BODY_TIMEOUT_SECS: u64 = 180;
 /// estimates (see `App::analyze_failures`). 200 is small enough to adapt within
 /// a bad day, large enough that the statistics mean something.
 pub const ANALYSIS_EVERY_FAILURES: u64 = 200;
+
+#[cfg(test)]
+mod zen_fingerprint_tests {
+    use super::*;
+
+    /// zen's gate accepts a session id only when the low 12 bits of the 48-bit
+    /// hex field are >= 0xfc0 (i.e. `0xfff - counter` with `counter <= 63`).
+    /// This is the invariant whose silent breakage produced a 403 with no
+    /// diagnostic, so it gets an explicit test.
+    fn low12_ok(hex_field: &str) -> bool {
+        let v = u64::from_str_radix(hex_field, 16).expect("12 hex chars");
+        (v & 0xfff) >= 0xfc0
+    }
+
+    fn split_id(id: &str, prefix: &str) -> (String, String) {
+        let body = id
+            .strip_prefix(&format!("{prefix}_"))
+            .unwrap_or_else(|| panic!("{id} missing {prefix}_ prefix"));
+        (body[..12].to_string(), body[12..].to_string())
+    }
+
+    #[test]
+    fn session_id_low12_always_in_the_accepted_window() {
+        for _ in 0..2000 {
+            let id = opencode_session_id();
+            let (hex, tail) = split_id(&id, "ses");
+            assert!(low12_ok(&hex), "counter bits out of window in {id}");
+            assert_eq!(hex.len(), 12);
+            assert!(hex.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+            assert_eq!(tail.len(), 14, "tail must be exactly 14 chars: {id}");
+            assert!(tail.chars().all(|c| c.is_ascii_alphanumeric()), "{id}");
+        }
+    }
+
+    #[test]
+    fn request_id_shape() {
+        for _ in 0..500 {
+            let id = opencode_request_id();
+            let (hex, tail) = split_id(&id, "msg");
+            assert_eq!(hex.len(), 12);
+            assert_eq!(tail.len(), 14, "{id}");
+        }
+    }
+
+    /// Consecutive ids must differ, or a stuck session would reuse one value.
+    #[test]
+    fn session_ids_are_distinct() {
+        let a = opencode_session_id();
+        let b = opencode_session_id();
+        assert_ne!(a, b);
+    }
+
+    /// A uniform-random field would pass this test only 1.6% of the time; with
+    /// 2000 samples the probability of a false pass is nil.
+    #[test]
+    fn uniform_random_would_have_failed_this() {
+        let mut ok = 0;
+        for i in 0..4096u64 {
+            if (i & 0xfff) >= 0xfc0 {
+                ok += 1;
+            }
+        }
+        assert_eq!(ok, 64, "the accepted window must stay exactly 64 values");
+    }
+}

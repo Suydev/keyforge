@@ -686,6 +686,7 @@ fn zen_shape_body(body: &[u8]) -> Vec<u8> {
             serde_json::json!({"include_usage": true}),
         );
         o.insert("tools".into(), merge_fingerprint_tools(o.get("tools")));
+        normalize_tool_arguments_in_body(&mut o);
         return serde_json::to_vec(&serde_json::Value::Object(o)).unwrap_or_else(|_| body.to_vec());
     }
 
@@ -710,6 +711,7 @@ fn zen_shape_body(body: &[u8]) -> Vec<u8> {
             .to_string();
         let content = m.get("content").cloned();
         let mut text = String::new();
+        let mut reasoning = String::new();
         let mut tool_calls: Vec<serde_json::Value> = Vec::new();
         let mut tool_results: Vec<serde_json::Value> = Vec::new();
         if let Some(blocks) = content.as_ref().and_then(|c| c.as_array()) {
@@ -721,7 +723,15 @@ fn zen_shape_body(body: &[u8]) -> Vec<u8> {
                             text.push_str(t);
                         }
                     }
-                    "thinking" => {}
+                    // Keep the reasoning: zen is a reasoning-first model, and
+                    // dropping it leaves an assistant turn that has tool_calls
+                    // but no reasoning_content, which zen refuses on the next
+                    // request. Claude Code sends thinking on every turn.
+                    "thinking" | "redacted_thinking" => {
+                        if let Some(t) = b.get("thinking").and_then(|t| t.as_str()) {
+                            reasoning.push_str(t);
+                        }
+                    }
                     "tool_use" => {
                         let id = b.get("id").and_then(|i| i.as_str()).unwrap_or("");
                         let name = b.get("name").and_then(|n| n.as_str()).unwrap_or("");
@@ -755,6 +765,15 @@ fn zen_shape_body(body: &[u8]) -> Vec<u8> {
         }
         if !tool_calls.is_empty() {
             turn.insert("tool_calls".into(), serde_json::Value::Array(tool_calls));
+        }
+        // zen's wire shape: reasoning comes back on the assistant turn. Sending
+        // it back on the next request is what keeps a multi-turn conversation
+        // (Claude Code) from being refused.
+        if !reasoning.trim().is_empty() {
+            turn.insert(
+                "reasoning_content".into(),
+                serde_json::Value::String(reasoning),
+            );
         }
         if turn.is_empty() {
             // Preserve an empty turn as an empty assistant/user content so the
@@ -852,6 +871,63 @@ fn translated_tools(v: Option<&serde_json::Value>) -> Vec<serde_json::Value> {
 
 /// Append the fingerprint tools zen requires, if absent. Deduplicates by name:
 /// zen 400s on a duplicate tool name.
+/// Coerce one assistant tool call's `arguments` into a JSON-object STRING.
+///
+/// zen rejects the whole request with HTTP 400 when any assistant turn carries a
+/// `function.arguments` that is not a stringified JSON object. Clients re-send
+/// conversation history verbatim, so a stream that died mid tool-call leaves a
+/// truncated (`""`), array, or otherwise malformed fragment in the history and
+/// every subsequent turn dies with a 400 that no amount of retrying fixes.
+///
+/// Anything that already parses as a JSON object is passed through byte-identical,
+/// so this can never change the behaviour of a request that was already valid.
+fn normalize_tool_arguments(args: &serde_json::Value) -> serde_json::Value {
+    match args {
+        serde_json::Value::String(s) => {
+            let t = s.trim();
+            if t.is_empty() {
+                return serde_json::Value::String("{}".into());
+            }
+            match serde_json::from_str::<serde_json::Value>(t) {
+                Ok(serde_json::Value::Object(_)) => serde_json::Value::String(t.to_string()),
+                // Parses, but to an array/scalar/null -- not an object.
+                Ok(_) => serde_json::Value::String("{}".into()),
+                // Malformed or truncated: a stream cut off mid tool-call.
+                Err(_) => serde_json::Value::String("{}".into()),
+            }
+        }
+        serde_json::Value::Object(_) => serde_json::Value::String(args.to_string()),
+        // Array, scalar, null: nothing usable, fall back to an empty object.
+        _ => serde_json::Value::String("{}".into()),
+    }
+}
+
+/// Walk every assistant message and repair its tool-call arguments in place.
+fn normalize_tool_arguments_in_body(body: &mut serde_json::Map<String, serde_json::Value>) {
+    let Some(messages) = body.get_mut("messages").and_then(|m| m.as_array_mut()) else {
+        return;
+    };
+    for msg in messages.iter_mut() {
+        let Some(calls) = msg
+            .get_mut("tool_calls")
+            .and_then(|t| t.as_array_mut())
+        else {
+            continue;
+        };
+        for call in calls.iter_mut() {
+            let Some(function) = call.get_mut("function") else {
+                continue;
+            };
+            if let Some(args) = function.get("arguments") {
+                let fixed = normalize_tool_arguments(args);
+                if let Some(function) = function.as_object_mut() {
+                    function.insert("arguments".into(), fixed);
+                }
+            }
+        }
+    }
+}
+
 fn merge_fingerprint_tools(existing: Option<&serde_json::Value>) -> serde_json::Value {
     merge_fingerprint_tools_list(
         existing
@@ -2621,5 +2697,116 @@ mod tests {
         assert!(m.starts_with("sk-abcdefg"));
         assert!(m.ends_with("wxyz"));
         assert!(!m.contains("hij12345"));
+    }
+}
+
+
+#[cfg(test)]
+mod zen_body_tests {
+    use super::*;
+
+    fn body(v: serde_json::Value) -> Vec<u8> {
+        serde_json::to_vec(&v).unwrap()
+    }
+
+    /// A tool call truncated by a stream that died mid-call must not 400 the
+    /// whole conversation on the next turn.
+    #[test]
+    fn truncated_tool_arguments_are_repaired_to_an_empty_object() {
+        for bad in [
+            serde_json::json!({"function": {"name": "bash", "arguments": ""}}),
+            serde_json::json!({"function": {"name": "bash", "arguments": "{\"comm"}}),
+            serde_json::json!({"function": {"name": "bash", "arguments": "[1,2]"}}),
+            serde_json::json!({"function": {"name": "bash", "arguments": "null"}}),
+            serde_json::json!({"function": {"name": "bash", "arguments": null}}),
+            serde_json::json!({"function": {"name": "bash", "arguments": 42}}),
+        ] {
+            let mut o = serde_json::json!({
+                "model": "space-bunny-free",
+                "messages": [{"role": "assistant", "content": "ok", "tool_calls": [bad]}],
+            })
+            .as_object()
+            .unwrap()
+            .clone();
+            normalize_tool_arguments_in_body(&mut o);
+            let got = o["messages"][0]["tool_calls"][0]["function"]["arguments"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            assert_eq!(got, "{}", "expected {{}} for {bad}");
+        }
+    }
+
+    /// The common valid case must survive byte-identical -- an already-good
+    /// request can never be made worse by this.
+    #[test]
+    fn valid_tool_arguments_pass_through_untouched() {
+        let raw = "{\"command\":\"ls\",\"path\":\"/tmp\"}";
+        let mut o = serde_json::json!({
+            "messages": [{"role": "assistant", "tool_calls": [
+                {"function": {"name": "bash", "arguments": raw}}
+            ]}],
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        normalize_tool_arguments_in_body(&mut o);
+        assert_eq!(
+            o["messages"][0]["tool_calls"][0]["function"]["arguments"].as_str(),
+            Some(raw)
+        );
+    }
+
+    /// Claude Code sends a thinking block on every assistant turn; zen is
+    /// reasoning-first and needs it echoed back.
+    #[test]
+    fn thinking_blocks_become_reasoning_content() {
+        let out = zen_shape_body(&body(serde_json::json!({
+            "model": "space-bunny-free",
+            "max_tokens": 100,
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "the user greeted me"},
+                    {"type": "text", "text": "hello"}
+                ]},
+                {"role": "user", "content": "again"}
+            ],
+            "tools": [{"name": "bash", "input_schema": {"type": "object"}}],
+        })));
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let assistant = v["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["role"] == "assistant")
+            .expect("assistant turn survived translation");
+        assert_eq!(
+            assistant["reasoning_content"].as_str(),
+            Some("the user greeted me"),
+            "thinking must be preserved for zen"
+        );
+        assert_eq!(assistant["content"].as_str(), Some("hello"));
+    }
+
+    /// The gate contract: stream forced true and all four tools present.
+    #[test]
+    fn zen_gate_fields_are_forced() {
+        let out = zen_shape_body(&body(serde_json::json!({
+            "model": "space-bunny-free",
+            "stream": false,
+            "messages": [{"role": "user", "content": "hi"}],
+        })));
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v["stream"].as_bool(), Some(true), "zen 403s on stream:false");
+        let names: Vec<String> = v["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["function"]["name"].as_str().unwrap().to_string())
+            .collect();
+        for want in ["bash", "glob", "grep", "read"] {
+            assert!(names.contains(&want.to_string()), "missing {want}: {names:?}");
+        }
     }
 }
