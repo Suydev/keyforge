@@ -706,7 +706,56 @@ pub fn spawn_proxy_maintainer(app: Arc<App>) {
 /// missing.
 ///
 /// Returns the number of usable candidates in the downloaded file, or `Err`.
+/// Is the on-disk candidate list missing or older than `cadence`?
+///
+/// `cadence == 0` disables the guard entirely, so an explicit reload always
+/// downloads. A missing file is always stale, otherwise the first run after
+/// install would skip the only download it will ever make.
+pub(crate) fn candidate_file_is_stale(path: &std::path::Path, cadence: u64) -> bool {
+    if cadence == 0 {
+        return true;
+    }
+    match std::fs::metadata(path).and_then(|m| m.modified()) {
+        Ok(modified) => match modified.elapsed() {
+            Ok(age) => age.as_secs() >= cadence,
+            // Clock went backwards: treat as fresh rather than re-downloading.
+            Err(_) => false,
+        },
+        Err(_) => true,
+    }
+}
+
 pub async fn download_candidates(app: &Arc<App>) -> Result<usize, String> {
+    // Honour KEYFORGE_PROXY_DOWNLOAD_SECS. It was documented and configurable but
+    // read by nothing, so the full public list (~5k records, a few hundred KB)
+    // was re-pulled on EVERY maintenance cycle -- 15 minutes by default, four
+    // times the advertised two-hour cadence, on metered mobile data.
+    //
+    // The guard is file age rather than a timestamp, so it survives a restart
+    // and does not need its own state: an operator who wants a fresh list now
+    // deletes the file or forces a reload.
+    let cadence = config::proxy_download_secs();
+    let target = config::proxy_candidates_paths()
+        .first()
+        .cloned()
+        .unwrap_or_default();
+    if !candidate_file_is_stale(&target, cadence) {
+        let age_min = std::fs::metadata(&target)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|m| m.elapsed().ok())
+            .map(|a| a.as_secs() / 60)
+            .unwrap_or(0);
+        app.event(
+            "info",
+            format!(
+                "proxy: candidate list is {age_min}m old, skipping download (cadence {})",
+                cadence / 60
+            ),
+        );
+        return Ok(0);
+    }
+
     let url = config::proxy_download_url();
     let raw = upstream::direct_get(&url, Duration::from_secs(30)).await?;
 
@@ -1125,4 +1174,60 @@ pub async fn sweep_now(app: Arc<App>) {
     );
     sweep_batch(&app, batch).await;
     app.event("info", format!("refresh done — {}", sweep_summary(&app)));
+}
+
+#[cfg(test)]
+mod candidate_cadence_tests {
+    use super::*;
+
+    /// The regression: the knob was documented, configurable, and read by
+    /// nothing, so every 15-minute maintenance cycle re-downloaded the whole
+    /// public proxy list on metered data.
+    #[test]
+    fn a_fresh_candidate_file_suppresses_the_download() {
+        let dir = std::env::temp_dir().join(format!("kf-cadence-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("free-proxy-list.json");
+        std::fs::write(&file, b"[]").unwrap();
+
+        // Age the file just past the cadence so the skip must NOT fire.
+        let cadence = config::PROXY_DOWNLOAD_SECS + 60;
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(cadence);
+        set_file_mtime(&file, old);
+        assert!(
+            candidate_file_is_stale(&file, cadence),
+            "an old file must be considered stale"
+        );
+
+        // A brand-new file must be considered fresh, which is what suppresses
+        // the download.
+        let fresh = std::time::SystemTime::now();
+        set_file_mtime(&file, fresh);
+        assert!(
+            !candidate_file_is_stale(&file, cadence),
+            "a just-written file must NOT be stale"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A cadence of 0 means "never auto-refresh"; a missing file can never be
+    /// fresh, or the first run after install would skip the only download.
+    #[test]
+    fn a_missing_file_is_always_stale() {
+        let missing = std::env::temp_dir().join("kf-cadence-does-not-exist.json");
+        std::fs::remove_file(&missing).ok();
+        assert!(candidate_file_is_stale(
+            &missing,
+            config::PROXY_DOWNLOAD_SECS
+        ));
+        // Cadence 0 disables the guard entirely: everything is stale, so the
+        // operator always gets a download when they ask for one.
+        assert!(candidate_file_is_stale(&missing, 0));
+    }
+
+    fn set_file_mtime(path: &std::path::Path, t: std::time::SystemTime) {
+        let f = std::fs::File::options().write(true).open(path).unwrap();
+        f.set_modified(t).unwrap();
+    }
 }
